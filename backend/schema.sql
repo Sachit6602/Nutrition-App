@@ -16,7 +16,10 @@ CREATE TABLE IF NOT EXISTS user_profiles (
     target_calories INTEGER,
     height_cm INTEGER,
     weight_kg REAL,
+    age INTEGER,
+    sex TEXT CHECK(sex IN ('male', 'female')),
     activity_level TEXT CHECK(activity_level IN ('low', 'medium', 'high')),
+    intensity_percent INTEGER DEFAULT 0,  -- deficit/surplus e.g. -20 (lose), +10 (gain)
     allergies_json TEXT DEFAULT '[]',  -- JSON array of strings
     diet_type TEXT DEFAULT 'none',  -- 'none', 'veg', 'vegan', 'keto', etc.
     preferences_json TEXT DEFAULT '{}',  -- JSON object for cuisine, cookingTime, mealType, etc.

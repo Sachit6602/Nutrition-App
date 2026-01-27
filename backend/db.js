@@ -18,14 +18,33 @@ function initializeDatabase() {
   try {
     const schemaPath = join(__dirname, 'schema.sql');
     const schema = readFileSync(schemaPath, 'utf8');
-    
+
     // Execute schema (better-sqlite3 executes statements sequentially)
     db.exec(schema);
+    migrateSchema();
     console.log('✅ Database initialized successfully');
   } catch (error) {
     // If schema file doesn't exist or error, create tables manually
     console.log('⚠️  Schema file not found, creating tables manually...');
     createTables();
+    migrateSchema();
+  }
+}
+
+// Add new columns to existing user_profiles (idempotent)
+function migrateSchema() {
+  const columns = [
+    { name: 'age', def: 'INTEGER' },
+    { name: 'sex', def: "TEXT CHECK(sex IN ('male', 'female'))" },
+    { name: 'intensity_percent', def: 'INTEGER DEFAULT 0' },
+  ];
+  for (const { name, def } of columns) {
+    try {
+      db.exec(`ALTER TABLE user_profiles ADD COLUMN ${name} ${def}`);
+      console.log(`✅ Added column user_profiles.${name}`);
+    } catch (e) {
+      if (!/duplicate column name/i.test(e.message)) throw e;
+    }
   }
 }
 
@@ -48,7 +67,10 @@ function createTables() {
       target_calories INTEGER,
       height_cm INTEGER,
       weight_kg REAL,
+      age INTEGER,
+      sex TEXT CHECK(sex IN ('male', 'female')),
       activity_level TEXT CHECK(activity_level IN ('low', 'medium', 'high')),
+      intensity_percent INTEGER DEFAULT 0,
       allergies_json TEXT DEFAULT '[]',
       diet_type TEXT DEFAULT 'none',
       preferences_json TEXT DEFAULT '{}',
@@ -119,26 +141,24 @@ export const getProfile = (userId) => {
 
 export const updateProfile = (userId, data) => {
   const allowedFields = [
-    'goal', 'target_calories', 'height_cm', 'weight_kg', 
-    'activity_level', 'allergies_json', 'diet_type', 'preferences_json'
+    'goal', 'target_calories', 'height_cm', 'weight_kg', 'age', 'sex',
+    'activity_level', 'intensity_percent', 'allergies_json', 'diet_type', 'preferences_json'
   ];
   
   const updates = [];
   const values = [];
   
   for (const [key, value] of Object.entries(data)) {
-    if (allowedFields.includes(key)) {
-      // Handle JSON fields
-      if (key === 'allergies_json' && Array.isArray(value)) {
-        updates.push('allergies_json = ?');
-        values.push(JSON.stringify(value));
-      } else if (key === 'preferences_json' && typeof value === 'object') {
-        updates.push('preferences_json = ?');
-        values.push(JSON.stringify(value));
-      } else if (key !== 'allergies_json' && key !== 'preferences_json') {
-        updates.push(`${key} = ?`);
-        values.push(value);
-      }
+    if (!allowedFields.includes(key)) continue;
+    if (key === 'allergies_json') {
+      updates.push('allergies_json = ?');
+      values.push(Array.isArray(value) ? JSON.stringify(value) : value);
+    } else if (key === 'preferences_json') {
+      updates.push('preferences_json = ?');
+      values.push(typeof value === 'object' && value !== null ? JSON.stringify(value) : value);
+    } else {
+      updates.push(`${key} = ?`);
+      values.push(value);
     }
   }
   

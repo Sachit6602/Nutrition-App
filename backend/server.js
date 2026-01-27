@@ -47,11 +47,82 @@ app.use((req, res, next) => {
   next();
 });
 
+// Activity factors: 1.2 (sedentary), 1.375, 1.55, 1.725, 1.9
+const ACTIVITY_FACTORS = { low: 1.2, medium: 1.55, high: 1.725 };
+
+// Default macro assumptions
+const PROTEIN_G_PER_KG = 1.8;
+const FAT_PERCENT_OF_CALORIES = 0.275; // 27.5%
+const CALORIES_PER_G_PROTEIN = 4;
+const CALORIES_PER_G_FAT = 9;
+const CALORIES_PER_G_CARBS = 4;
+
+/**
+ * Compute BMR (Mifflin–St Jeor), TDEE, target calories, and macro targets.
+ * @param {object} profile - { age, sex, height_cm, weight_kg, activity_level, goal, intensity_percent }
+ * @returns {{ bmr, tdee, calories, protein_g, fat_g, carbs_g, goal } | null}
+ */
+function calculate_daily_targets(profile) {
+  const age = profile?.age;
+  const sex = profile?.sex;
+  const height_cm = profile?.height_cm;
+  const weight_kg = profile?.weight_kg;
+  const activity_level = profile?.activity_level || 'medium';
+  const goal = profile?.goal || 'maintain';
+  const intensity = profile?.intensity_percent != null ? Number(profile.intensity_percent) : (goal === 'lose' ? -20 : goal === 'gain' ? 10 : 0);
+
+  if (age == null || !sex || height_cm == null || weight_kg == null) {
+    return null;
+  }
+  const h = Number(height_cm);
+  const w = Number(weight_kg);
+  const a = Number(age);
+  if (h <= 0 || w <= 0 || a <= 0) return null;
+
+  // BMR Mifflin–St Jeor
+  const bmr = sex === 'female'
+    ? 10 * w + 6.25 * h - 5 * a - 161
+    : 10 * w + 6.25 * h - 5 * a + 5;
+
+  const factor = ACTIVITY_FACTORS[activity_level] ?? ACTIVITY_FACTORS.medium;
+  const tdee = Math.round(bmr * factor);
+
+  let calories;
+  const override = profile?.target_calories != null && Number(profile.target_calories) > 0;
+  if (override) {
+    calories = Math.round(Number(profile.target_calories));
+  } else {
+    let multiplier = 1;
+    if (goal === 'maintain') multiplier = 1;
+    else if (goal === 'lose') multiplier = Math.max(0.5, 1 + intensity / 100);
+    else if (goal === 'gain') multiplier = Math.min(1.5, 1 + intensity / 100);
+    calories = Math.round(tdee * multiplier);
+  }
+
+  const protein_g = Math.round(weight_kg * PROTEIN_G_PER_KG);
+  const protein_cal = protein_g * CALORIES_PER_G_PROTEIN;
+  const fat_cal = calories * FAT_PERCENT_OF_CALORIES;
+  const fat_g = Math.round(fat_cal / CALORIES_PER_G_FAT);
+  const remaining_cal = Math.max(0, calories - protein_cal - fat_cal);
+  const carbs_g = Math.round(remaining_cal / CALORIES_PER_G_CARBS);
+
+  return {
+    bmr: Math.round(bmr),
+    tdee,
+    calories,
+    protein_g,
+    fat_g,
+    carbs_g,
+    goal,
+  };
+}
+
 // Helper function to construct prompt from profile data and optional overrides
 function constructPrompt(profile, overrides = {}) {
   const {
     goal = overrides.goal,
     target_calories = overrides.targetCalories,
+    targets = overrides.targets,
     allergies = overrides.allergies || [],
     diet_type = overrides.dietType || 'none',
     preferences = overrides.preferences || {},
@@ -60,8 +131,18 @@ function constructPrompt(profile, overrides = {}) {
 
   let prompt = `Act as a nutrition coach. Use web search to find recipes that match the following requirements:\n\n`;
 
-  // Goals
-  if (goal) {
+  // User's daily targets (from BMR/TDEE calculator) — use these for portioning and macro fit
+  if (targets && typeof targets.calories === 'number') {
+    prompt += `User's daily targets: ${targets.calories} kcal, ${targets.protein_g} g protein, ${targets.carbs_g} g carbs, ${targets.fat_g} g fat. `;
+    prompt += `Suggest recipes and portions that fit within these targets. `;
+    if (targets.goal) {
+      prompt += `Goal: ${targets.goal} weight. `;
+    }
+    prompt += `\n`;
+  }
+
+  // Goals (fallback when no targets)
+  if (!targets && goal) {
     prompt += `Goal: ${goal} weight`;
     if (target_calories) {
       prompt += ` (target: ${target_calories} calories per day)`;
@@ -98,17 +179,67 @@ function constructPrompt(profile, overrides = {}) {
     prompt += `\nUser request: ${userRequest}\n`;
   }
 
-  prompt += `\nPlease provide:\n`;
-  prompt += `1. Recipe name and source URL\n`;
-  prompt += `2. Detailed step-by-step cooking instructions\n`;
-  prompt += `3. Complete list of ingredients with quantities\n`;
-  prompt += `4. Estimated calories per serving (calculate if not available)\n`;
-  prompt += `5. Key macronutrients (protein, carbs, fats) and other important nutrients\n`;
-  prompt += `6. Brief description\n`;
-  prompt += `7. Confirmation that it avoids the listed allergies and matches the diet type\n`;
-  prompt += `\nFormat your response in a clear, structured way. If possible, provide 2-3 recipe options.`;
+  prompt += `\n\nIMPORTANT: Return ONLY valid JSON with this exact schema. Do not include any text before or after the JSON:\n`;
+  prompt += `{\n`;
+  prompt += `  "recipes": [\n`;
+  prompt += `    {\n`;
+  prompt += `      "title": "Recipe name",\n`;
+  prompt += `      "source_url": "https://recipe-source-url.com",\n`;
+  prompt += `      "image_url": "https://image-url.com/recipe.jpg",\n`;
+  prompt += `      "ingredients": [\n`;
+  prompt += `        {"name": "ingredient name", "amount": "quantity", "unit": "unit"}\n`;
+  prompt += `      ],\n`;
+  prompt += `      "steps": ["step 1", "step 2", "step 3"],\n`;
+  prompt += `      "nutrients": {\n`;
+  prompt += `        "calories": 500,\n`;
+  prompt += `        "protein_g": 30,\n`;
+  prompt += `        "carbs_g": 45,\n`;
+  prompt += `        "fat_g": 20\n`;
+  prompt += `      },\n`;
+  prompt += `      "allergy_warnings": ["warning1", "warning2"],\n`;
+  prompt += `      "daily_contribution": "This meal is ~35% of daily calories and ~40% of daily protein."\n`;
+  prompt += `    }\n`;
+  prompt += `  ]\n`;
+  prompt += `}\n\n`;
+  prompt += `Provide 2-3 recipe options. For each recipe:\n`;
+  prompt += `- Find a real recipe URL and image URL from web search\n`;
+  prompt += `- Include complete ingredients with amounts and units\n`;
+  prompt += `- Provide detailed step-by-step instructions\n`;
+  prompt += `- Calculate accurate nutrition values (per serving)\n`;
+  prompt += `- Include "daily_contribution": a short sentence saying how this serving contributes to the user's daily totals (e.g. "% of daily calories and % of daily protein")\n`;
+  prompt += `- List any allergy warnings if the recipe contains allergens (even if user doesn't have those allergies, list them for safety)\n`;
+  prompt += `- If image_url is not available, use an empty string\n`;
 
   return prompt;
+}
+
+// Helper function to parse JSON from LLM response
+function parseRecipeJSON(content) {
+  // Try to extract JSON from the response (might have markdown code blocks or extra text)
+  let jsonStr = content.trim();
+  
+  // Remove markdown code blocks if present
+  jsonStr = jsonStr.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+  
+  // Try to find JSON object in the response
+  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    jsonStr = jsonMatch[0];
+  }
+  
+  try {
+    const parsed = JSON.parse(jsonStr);
+    // Validate structure
+    if (parsed.recipes && Array.isArray(parsed.recipes)) {
+      return parsed.recipes;
+    }
+    throw new Error('Invalid recipe structure');
+  } catch (error) {
+    console.error('Failed to parse JSON:', error);
+    console.error('Response content:', content.substring(0, 500));
+    // Return empty array if parsing fails
+    return [];
+  }
 }
 
 // Helper function to call Perplexity API
@@ -125,7 +256,7 @@ async function callPerplexityAPI(prompt) {
     messages: [
       {
         role: 'system',
-        content: 'You are a nutrition coach and recipe expert. Always provide structured, accurate information about recipes, nutrition, and dietary restrictions. Format your responses clearly with sections for steps, ingredients, nutrients, and calories.',
+        content: 'You are a nutrition coach and recipe expert. You MUST return ONLY valid JSON. Do not include any explanatory text, markdown formatting, or code blocks. Return pure JSON that matches the exact schema requested.',
       },
       {
         role: 'user',
@@ -133,7 +264,7 @@ async function callPerplexityAPI(prompt) {
       },
     ],
     temperature: 0.7,
-    max_tokens: 2000, // Reduced to fit within credit limits
+    max_tokens: 1000, // Reduced to fit within credit limits (JSON is more concise than text)
   };
 
   const headers = {
@@ -252,6 +383,26 @@ app.put('/me/profile', authenticate, (req, res) => {
   }
 });
 
+// Get calculated daily targets (BMR, TDEE, calories, macros)
+app.get('/me/targets', authenticate, (req, res) => {
+  try {
+    const profile = getProfile(req.userId);
+    if (!profile) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+    const targets = calculate_daily_targets(profile);
+    if (!targets) {
+      return res.status(400).json({
+        error: 'Cannot compute targets. Please set age, sex, height (cm), and weight (kg) in your profile.',
+      });
+    }
+    res.json({ success: true, targets });
+  } catch (error) {
+    console.error('Error getting targets:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // ==================== MEAL PLANNING ROUTES ====================
 
 // New authenticated meal planning endpoint (uses stored profile)
@@ -263,6 +414,9 @@ app.post('/me/plan_meal', authenticate, async (req, res) => {
       return res.status(404).json({ error: 'Profile not found. Please set up your profile first.' });
     }
 
+    // Compute daily targets (BMR → TDEE → macros) when profile has age, sex, height, weight
+    const targets = calculate_daily_targets(profile);
+
     // Allow optional overrides from request body
     const overrides = {
       goal: req.body.goal,
@@ -270,14 +424,18 @@ app.post('/me/plan_meal', authenticate, async (req, res) => {
       allergies: req.body.allergies,
       dietType: req.body.dietType,
       preferences: req.body.preferences,
-      request: req.body.request
+      request: req.body.request,
+      targets: targets || undefined
     };
 
-    // Construct prompt using profile data
+    // Construct prompt using profile data and calculated targets
     const prompt = constructPrompt(profile, overrides);
 
     // Call Perplexity API
     const result = await callPerplexityAPI(prompt);
+
+    // Parse JSON response
+    const recipes = parseRecipeJSON(result.content);
 
     // Store session data
     updateSessionData(
@@ -288,7 +446,7 @@ app.post('/me/plan_meal', authenticate, async (req, res) => {
 
     res.json({
       success: true,
-      recipes: result.content,
+      recipes: recipes,
       metadata: {
         model: result.model,
         usage: result.usage,
@@ -327,9 +485,12 @@ app.post('/api/plan_meal', async (req, res) => {
     // Call Perplexity API
     const result = await callPerplexityAPI(prompt);
 
+    // Parse JSON response
+    const recipes = parseRecipeJSON(result.content);
+
     res.json({
       success: true,
-      recipes: result.content,
+      recipes: recipes,
       metadata: {
         model: result.model,
         usage: result.usage,
@@ -424,6 +585,7 @@ app.get('/', (req, res) => {
       // Profile
       'GET /me/profile': 'Get user profile (auth required)',
       'PUT /me/profile': 'Update user profile (auth required)',
+      'GET /me/targets': 'Get calculated daily targets BMR/TDEE/macros (auth required)',
       // Meal Planning
       'POST /me/plan_meal': 'Get meal plan using stored profile (auth required)',
       'POST /api/plan_meal': 'Get meal plan (legacy, no auth)',
