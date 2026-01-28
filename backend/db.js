@@ -89,6 +89,63 @@ function createTables() {
     );
   `);
 
+  // Daily intake logs table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS daily_intake_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      source_type TEXT CHECK(source_type IN ('generated_recipe','saved_food','manual')) DEFAULT 'manual',
+      item_name TEXT NOT NULL,
+      calories REAL NOT NULL,
+      protein_g REAL,
+      carbs_g REAL,
+      fat_g REAL,
+      servings REAL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
+
+  // Daily activity logs table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS daily_activity_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      steps INTEGER DEFAULT 0,
+      active_minutes INTEGER,
+      calories_burned REAL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
+
+  // Saved foods table (predefined user foods)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS saved_foods (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      calories REAL NOT NULL,
+      protein_g REAL,
+      carbs_g REAL,
+      fat_g REAL,
+      default_servings REAL DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
+
+  // Create indexes
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+    CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id);
+    CREATE INDEX IF NOT EXISTS idx_saved_foods_user ON saved_foods(user_id);
+    -- Ensure one activity row per user/date for upsert behavior
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_activity_user_date_unique ON daily_activity_logs(user_id, date);
+  `);
+
   // Create indexes
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
@@ -190,6 +247,138 @@ export const updateSessionData = (userId, requestJson, responseJson) => {
       updated_at = CURRENT_TIMESTAMP
   `);
   stmt.run(userId, requestJson, responseJson, requestJson, responseJson);
+};
+
+// -------------------- Intake & Activity helpers --------------------
+export const addIntake = (userId, { date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings }) => {
+  const stmt = db.prepare(`
+    INSERT INTO daily_intake_logs (user_id, date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const result = stmt.run(userId, date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings || 1);
+  return { id: result.lastInsertRowid };
+};
+
+export const getIntakeByDate = (userId, date) => {
+  const stmt = db.prepare(`SELECT * FROM daily_intake_logs WHERE user_id = ? AND date = ? ORDER BY created_at DESC`);
+  const rows = stmt.all(userId, date);
+  return rows;
+};
+
+export const getIntakeTotalsByDate = (userId, date) => {
+  const stmt = db.prepare(`
+    SELECT
+      COALESCE(SUM(calories),0) AS calories_total,
+      COALESCE(SUM(protein_g),0) AS protein_total,
+      COALESCE(SUM(carbs_g),0) AS carbs_total,
+      COALESCE(SUM(fat_g),0) AS fat_total
+    FROM daily_intake_logs
+    WHERE user_id = ? AND date = ?
+  `);
+  return stmt.get(userId, date);
+};
+
+export const getIntakeCalendarTotals = (userId, monthPrefix) => {
+  // monthPrefix like '2026-01' - returns totals grouped by date
+  const stmt = db.prepare(`
+    SELECT date,
+      COALESCE(SUM(calories),0) AS calories_total,
+      COALESCE(SUM(protein_g),0) AS protein_total,
+      COALESCE(SUM(carbs_g),0) AS carbs_total,
+      COALESCE(SUM(fat_g),0) AS fat_total
+    FROM daily_intake_logs
+    WHERE user_id = ? AND date LIKE ?
+    GROUP BY date
+    ORDER BY date ASC
+  `);
+  return stmt.all(userId, `${monthPrefix}%`);
+};
+
+// Activity totals grouped by date for a month (monthPrefix like '2026-01')
+export const getActivityCalendarTotals = (userId, monthPrefix) => {
+  const stmt = db.prepare(`
+    SELECT date,
+      COALESCE(SUM(calories_burned),0) AS calories_burned_total
+    FROM daily_activity_logs
+    WHERE user_id = ? AND date LIKE ?
+    GROUP BY date
+    ORDER BY date ASC
+  `);
+  return stmt.all(userId, `${monthPrefix}%`);
+};
+
+export const getFrequentIntake = (userId, limit = 20) => {
+  const stmt = db.prepare(`
+    SELECT item_name, source_type, COUNT(*) AS count, AVG(calories) AS avg_calories,
+      AVG(COALESCE(protein_g,0)) AS avg_protein, AVG(COALESCE(carbs_g,0)) AS avg_carbs, AVG(COALESCE(fat_g,0)) AS avg_fat
+    FROM daily_intake_logs
+    WHERE user_id = ?
+    GROUP BY item_name
+    ORDER BY count DESC
+    LIMIT ?
+  `);
+  return stmt.all(userId, limit);
+};
+
+// Update an intake row (only if owned by user)
+export const updateIntake = (userId, intakeId, fields) => {
+  const allowed = ['item_name','calories','protein_g','carbs_g','fat_g','servings','source_type','date'];
+  const updates = [];
+  const values = [];
+  for (const [k,v] of Object.entries(fields)) {
+    if (!allowed.includes(k)) continue;
+    updates.push(`${k} = ?`);
+    values.push(v);
+  }
+  if (updates.length === 0) return { changes: 0 };
+  values.push(intakeId, userId);
+  const sql = `UPDATE daily_intake_logs SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`;
+  const stmt = db.prepare(sql);
+  const result = stmt.run(...values);
+  return { changes: result.changes };
+};
+
+export const deleteIntake = (userId, intakeId) => {
+  const stmt = db.prepare('DELETE FROM daily_intake_logs WHERE id = ? AND user_id = ?');
+  const result = stmt.run(intakeId, userId);
+  return { changes: result.changes };
+};
+
+// Saved foods helpers
+export const addSavedFood = (userId, { name, calories, protein_g, carbs_g, fat_g, default_servings }) => {
+  const stmt = db.prepare(`INSERT INTO saved_foods (user_id, name, calories, protein_g, carbs_g, fat_g, default_servings) VALUES (?, ?, ?, ?, ?, ?, ?)`);
+  const res = stmt.run(userId, name, calories, protein_g, carbs_g, fat_g, default_servings || 1);
+  return { id: res.lastInsertRowid };
+};
+
+export const getSavedFoods = (userId) => {
+  const stmt = db.prepare('SELECT * FROM saved_foods WHERE user_id = ? ORDER BY name ASC');
+  return stmt.all(userId);
+};
+
+export const deleteSavedFood = (userId, id) => {
+  const stmt = db.prepare('DELETE FROM saved_foods WHERE id = ? AND user_id = ?');
+  const res = stmt.run(id, userId);
+  return { changes: res.changes };
+};
+
+export const addActivity = (userId, { date, steps = 0, active_minutes = null, calories_burned = 0 }) => {
+  const stmt = db.prepare(`
+    INSERT INTO daily_activity_logs (user_id, date, steps, active_minutes, calories_burned)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(user_id, date) DO UPDATE SET
+      steps = excluded.steps,
+      active_minutes = excluded.active_minutes,
+      calories_burned = excluded.calories_burned,
+      created_at = CURRENT_TIMESTAMP
+  `);
+  stmt.run(userId, date, steps, active_minutes, calories_burned);
+  return { success: true };
+};
+
+export const getActivityByDate = (userId, date) => {
+  const stmt = db.prepare(`SELECT * FROM daily_activity_logs WHERE user_id = ? AND date = ?`);
+  return stmt.get(userId, date) || { steps: 0, active_minutes: 0, calories_burned: 0 };
 };
 
 export default db;

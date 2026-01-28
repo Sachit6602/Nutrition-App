@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 // Use empty string to use relative URLs (goes through Vite proxy)
 const API_BASE = '';
@@ -27,6 +27,21 @@ function App() {
   // Daily targets (BMR/TDEE/macros)
   const [targets, setTargets] = useState(null);
   const [targetsLoading, setTargetsLoading] = useState(false);
+
+  // Today / logging
+  const [todayTotals, setTodayTotals] = useState(null);
+  const [todayActivity, setTodayActivity] = useState(null);
+  const [frequentItems, setFrequentItems] = useState([]);
+  const [lastLogUpdate, setLastLogUpdate] = useState(0);
+  // Manual logging form state
+  const [manualName, setManualName] = useState('');
+  const [manualCalories, setManualCalories] = useState('');
+  const [manualProtein, setManualProtein] = useState('');
+  const [manualCarbs, setManualCarbs] = useState('');
+  const [manualFat, setManualFat] = useState('');
+  const [manualServings, setManualServings] = useState(1);
+  const [manualLoading, setManualLoading] = useState(false);
+  const [manualError, setManualError] = useState(null);
 
   // Meal planning
   const [goals, setGoals] = useState('maintain');
@@ -116,6 +131,113 @@ function App() {
     }
   };
 
+  // Add manual item to a specific date (used by calendar popup)
+  const addManualToDate = async (date) => {
+    if (!date) return alert('No date selected');
+    setManualError(null);
+    setManualLoading(true);
+    try {
+      const body = {
+        date: date,
+        item_name: manualName,
+        calories: Number(manualCalories),
+        protein_g: manualProtein ? Number(manualProtein) : undefined,
+        carbs_g: manualCarbs ? Number(manualCarbs) : undefined,
+        fat_g: manualFat ? Number(manualFat) : undefined,
+        servings: manualServings || 1,
+        source_type: 'manual'
+      };
+
+      const res = await fetch(`${API_BASE}/me/intake`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(body),
+      });
+
+      const text = await res.text();
+      if (!text) throw new Error('Empty response');
+      const data = JSON.parse(text);
+      if (!res.ok) throw new Error(data.error || 'Failed to add item');
+
+      // refresh selected day and notify
+      await selectDay(date);
+      window.dispatchEvent(new Event('logUpdated'));
+      // clear form
+      setManualName(''); setManualCalories(''); setManualProtein(''); setManualCarbs(''); setManualFat(''); setManualServings(1);
+    } catch (err) {
+      setManualError(err instanceof Error ? err.message : 'Failed to add');
+    } finally {
+      setManualLoading(false);
+    }
+  };
+
+  // Manual add food handler
+  const handleManualAdd = async (e) => {
+    e?.preventDefault();
+    setManualError(null);
+    setManualLoading(true);
+    try {
+      const body = {
+        date: new Date().toISOString().slice(0,10),
+        item_name: manualName,
+        calories: Number(manualCalories),
+        protein_g: manualProtein ? Number(manualProtein) : undefined,
+        carbs_g: manualCarbs ? Number(manualCarbs) : undefined,
+        fat_g: manualFat ? Number(manualFat) : undefined,
+        servings: manualServings || 1,
+        source_type: 'manual'
+      };
+
+      const res = await fetch(`${API_BASE}/me/intake`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify(body),
+      });
+
+      const text = await res.text();
+      if (!text) throw new Error('Empty response');
+      const data = JSON.parse(text);
+      if (!res.ok) throw new Error(data.error || 'Failed to add item');
+
+      // notify
+      window.dispatchEvent(new Event('logUpdated'));
+      // clear form
+      setManualName(''); setManualCalories(''); setManualProtein(''); setManualCarbs(''); setManualFat(''); setManualServings(1);
+    } catch (err) {
+      setManualError(err instanceof Error ? err.message : 'Failed to add');
+    } finally {
+      setManualLoading(false);
+    }
+  };
+
+  const handleQuickAdd = async (item) => {
+    try {
+      const body = {
+        date: new Date().toISOString().slice(0,10),
+        item_name: item.item_name || item.itemName || item.item_name,
+        calories: item.avg_calories || item.calories || 0,
+        protein_g: item.avg_protein || 0,
+        carbs_g: item.avg_carbs || 0,
+        fat_g: item.avg_fat || 0,
+        servings: 1,
+        source_type: item.source_type || 'saved_food'
+      };
+      const res = await fetch(`${API_BASE}/me/intake`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
+      });
+      const text = await res.text();
+      if (!text) throw new Error('Empty response');
+      const data = JSON.parse(text);
+      if (!res.ok) throw new Error(data.error || 'Failed to add item');
+      window.dispatchEvent(new Event('logUpdated'));
+    } catch (err) {
+      console.error('Quick add failed:', err);
+      alert('Failed to add item: ' + (err instanceof Error ? err.message : 'unknown'));
+    }
+  };
+
   const loadTargets = useCallback(async () => {
     setTargetsLoading(true);
     setTargets(null);
@@ -143,6 +265,253 @@ function App() {
       setTargets(null);
     }
   }, [isAuthenticated, profileRequired, profile, loadTargets]);
+
+  // History / calendar UI state
+  const [calendarMonth, setCalendarMonth] = useState(() => new Date().toISOString().slice(0,7)); // YYYY-MM
+  const [calendarTotals, setCalendarTotals] = useState([]);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [selectedDayItems, setSelectedDayItems] = useState([]);
+  const [showCalendarPopup, setShowCalendarPopup] = useState(false);
+  const [savedFoods, setSavedFoods] = useState([]);
+  const [savedLoading, setSavedLoading] = useState(false);
+  const popupRef = useRef(null);
+  const [manualPopupName, setManualPopupName] = useState('');
+  const [manualPopupCalories, setManualPopupCalories] = useState('');
+  // Simple client-side routing (home or /calendar)
+  const [route, setRoute] = useState(window.location.pathname || '/');
+
+  useEffect(() => {
+    const onPop = () => setRoute(window.location.pathname || '/');
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
+
+  const navigate = (path) => {
+    if (path !== window.location.pathname) window.history.pushState({}, '', path);
+    setRoute(path);
+  };
+
+  const loadCalendar = async (month) => {
+    if (!isAuthenticated) return;
+    try {
+      const res = await fetch(`${API_BASE}/me/intake/calendar?month=${month}`, { credentials: 'include' });
+      if (!res.ok) return;
+      const text = await res.text();
+      if (!text) return;
+      const data = JSON.parse(text);
+      setCalendarTotals(data.totals || []);
+    } catch (err) {
+      console.error('Failed to load calendar totals:', err);
+    }
+  };
+
+  const loadSavedFoods = async () => {
+    if (!isAuthenticated) return;
+    setSavedLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/me/saved_foods`, { credentials: 'include' });
+      if (!res.ok) return;
+      const text = await res.text();
+      if (!text) return;
+      const data = JSON.parse(text);
+      setSavedFoods(data.items || []);
+    } catch (err) {
+      console.error('Failed to load saved foods:', err);
+    } finally {
+      setSavedLoading(false);
+    }
+  };
+
+  const openHistory = async () => {
+    // keep for compatibility — navigate to calendar route
+    navigate('/calendar');
+  };
+
+  const closeHistory = () => {
+    navigate('/');
+    setSelectedDate(null);
+    setSelectedDayItems([]);
+  };
+
+  const selectDay = async (date) => {
+    setSelectedDate(date);
+    try {
+      const res = await fetch(`${API_BASE}/me/intake?date=${date}`, { credentials: 'include' });
+      if (!res.ok) return;
+      const text = await res.text();
+      if (!text) return;
+      const data = JSON.parse(text);
+      setSelectedDayItems(data.items || []);
+    } catch (err) {
+      console.error('Failed to load day items:', err);
+    }
+  };
+
+  // Edit/delete item flows
+  const [editingId, setEditingId] = useState(null);
+  const [editFields, setEditFields] = useState({ item_name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', servings: 1 });
+
+  const startEdit = (item) => {
+    setEditingId(item.id);
+    setEditFields({
+      item_name: item.item_name || '',
+      calories: item.calories || '',
+      protein_g: item.protein_g || '',
+      carbs_g: item.carbs_g || '',
+      fat_g: item.fat_g || '',
+      servings: item.servings || 1,
+    });
+  };
+
+  const saveEdit = async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/me/intake/${id}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
+        body: JSON.stringify({
+          item_name: editFields.item_name,
+          calories: Number(editFields.calories),
+          protein_g: editFields.protein_g !== '' ? Number(editFields.protein_g) : null,
+          carbs_g: editFields.carbs_g !== '' ? Number(editFields.carbs_g) : null,
+          fat_g: editFields.fat_g !== '' ? Number(editFields.fat_g) : null,
+          servings: editFields.servings !== '' ? Number(editFields.servings) : 1,
+        })
+      });
+      const text = await res.text();
+      if (!text) throw new Error('Empty response');
+      const data = JSON.parse(text);
+      if (!res.ok) throw new Error(data.error || 'Failed to update');
+      // refresh day
+      await selectDay(selectedDate);
+      window.dispatchEvent(new Event('logUpdated'));
+      setEditingId(null);
+    } catch (err) {
+      alert('Failed to save: ' + (err instanceof Error ? err.message : 'unknown'));
+    }
+  };
+
+  const removeItem = async (id) => {
+    if (!confirm('Delete this entry?')) return;
+    try {
+      const res = await fetch(`${API_BASE}/me/intake/${id}`, { method: 'DELETE', credentials: 'include' });
+      const text = await res.text();
+      if (!text) throw new Error('Empty response');
+      const data = JSON.parse(text);
+      if (!res.ok) throw new Error(data.error || 'Failed to delete');
+      await selectDay(selectedDate);
+      window.dispatchEvent(new Event('logUpdated'));
+    } catch (err) {
+      alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'));
+    }
+  };
+
+  const addSavedToDate = async (savedItem, date) => {
+    try {
+      const body = {
+        date: date || new Date().toISOString().slice(0,10),
+        item_name: savedItem.name,
+        calories: Number(savedItem.calories),
+        protein_g: savedItem.protein_g != null ? Number(savedItem.protein_g) : undefined,
+        carbs_g: savedItem.carbs_g != null ? Number(savedItem.carbs_g) : undefined,
+        fat_g: savedItem.fat_g != null ? Number(savedItem.fat_g) : undefined,
+        servings: savedItem.default_servings || 1,
+        source_type: 'saved_food'
+      };
+      const res = await fetch(`${API_BASE}/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
+      const text = await res.text();
+      if (!text) throw new Error('Empty response');
+      const data = JSON.parse(text);
+      if (!res.ok) throw new Error(data.error || 'Failed to add');
+      await selectDay(date || new Date().toISOString().slice(0,10));
+      window.dispatchEvent(new Event('logUpdated'));
+    } catch (err) {
+      alert('Failed to add saved food: ' + (err instanceof Error ? err.message : 'unknown'));
+    }
+  };
+
+  // Create saved food
+  const [newSaved, setNewSaved] = useState({ name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', default_servings: 1 });
+  const createSavedFood = async () => {
+    if (!newSaved.name || newSaved.calories === '') return alert('Name and calories required');
+    try {
+      const res = await fetch(`${API_BASE}/me/saved_foods`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({
+        name: newSaved.name,
+        calories: Number(newSaved.calories),
+        protein_g: newSaved.protein_g !== '' ? Number(newSaved.protein_g) : undefined,
+        carbs_g: newSaved.carbs_g !== '' ? Number(newSaved.carbs_g) : undefined,
+        fat_g: newSaved.fat_g !== '' ? Number(newSaved.fat_g) : undefined,
+        default_servings: newSaved.default_servings || 1,
+      })});
+      const txt = await res.text();
+      if (!txt) throw new Error('Empty response');
+      const data = JSON.parse(txt);
+      if (!res.ok) throw new Error(data.error || 'Failed to create');
+      setNewSaved({ name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', default_servings: 1 });
+      await loadSavedFoods();
+    } catch (err) {
+      alert('Create failed: ' + (err instanceof Error ? err.message : 'unknown'));
+    }
+  };
+
+  // Load today's intake/activity and frequent items
+  const loadTodayData = useCallback(async (date) => {
+    if (!isAuthenticated) return;
+    const d = date || new Date().toISOString().slice(0,10);
+    try {
+      const [intakeRes, activityRes, freqRes] = await Promise.all([
+        fetch(`${API_BASE}/me/intake?date=${d}`, { credentials: 'include' }),
+        fetch(`${API_BASE}/me/activity?date=${d}`, { credentials: 'include' }),
+        fetch(`${API_BASE}/me/intake/frequent`, { credentials: 'include' }),
+      ]);
+
+      if (intakeRes.ok) {
+        const text = await intakeRes.text();
+        if (text) setTodayTotals(JSON.parse(text).totals || null);
+      }
+      if (activityRes.ok) {
+        const text = await activityRes.text();
+        if (text) setTodayActivity(JSON.parse(text).activity || null);
+      }
+      if (freqRes.ok) {
+        const text = await freqRes.text();
+        if (text) setFrequentItems(JSON.parse(text).items || []);
+      }
+    } catch (err) {
+      console.error('Failed to load today data:', err);
+    }
+  }, [isAuthenticated]);
+
+  useEffect(() => {
+    if (isAuthenticated && !profileRequired) {
+      loadTodayData();
+    }
+
+    // listen for log updates from child components
+    const handler = () => {
+      setLastLogUpdate(Date.now());
+    };
+    window.addEventListener('logUpdated', handler);
+    return () => window.removeEventListener('logUpdated', handler);
+  }, [isAuthenticated, profileRequired, loadTodayData]);
+
+  // When navigating to calendar page, load month data and saved foods
+  useEffect(() => {
+    if (route && route.startsWith && route.startsWith('/calendar') && isAuthenticated) {
+      loadCalendar(calendarMonth);
+      loadSavedFoods();
+    }
+  }, [route, calendarMonth, isAuthenticated]);
+
+  // When the small popup is opened, load calendar totals for the month
+  useEffect(() => {
+    if (showCalendarPopup && isAuthenticated) {
+      loadCalendar(calendarMonth);
+    }
+  }, [showCalendarPopup, calendarMonth, isAuthenticated]);
+
+  // reload when a new log happens
+  useEffect(() => {
+    if (lastLogUpdate) loadTodayData();
+  }, [lastLogUpdate, loadTodayData]);
 
   // Reset intensity to sensible defaults when goal changes
   useEffect(() => {
@@ -521,20 +890,270 @@ function App() {
             </form>
           )}
         </div>
+
+        {showCalendarPopup && (
+          <div className="absolute right-0 top-full mt-2 z-50 w-96 bg-white rounded-lg shadow-lg p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <button onClick={() => { const prev = new Date(calendarMonth + '-01'); prev.setMonth(prev.getMonth() - 1); const m = prev.toISOString().slice(0,7); setCalendarMonth(m); loadCalendar(m); }} className="px-2 py-1 border rounded">◀</button>
+                <div className="font-medium">{new Date(calendarMonth + '-01').toLocaleString(undefined, { month: 'long', year: 'numeric' })}</div>
+                <button onClick={() => { const next = new Date(calendarMonth + '-01'); next.setMonth(next.getMonth() + 1); const m = next.toISOString().slice(0,7); setCalendarMonth(m); loadCalendar(m); }} className="px-2 py-1 border rounded">▶</button>
+              </div>
+              <div>
+                <button onClick={() => setShowCalendarPopup(false)} className="px-2 py-1 text-sm text-gray-600">Close</button>
+              </div>
+            </div>
+
+            {/* Calendar grid */}
+            <div className="grid grid-cols-7 gap-1 text-center text-sm">
+              {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => (
+                <div key={d} className="text-xs text-gray-500">{d}</div>
+              ))}
+
+              {(() => {
+                const [y, m] = calendarMonth.split('-').map(Number);
+                const first = new Date(y, m - 1, 1);
+                const start = first.getDay();
+                const days = new Date(y, m, 0).getDate();
+                const cells = [];
+                const activeSet = new Set((calendarTotals || []).map(t => t.date));
+                for (let i = 0; i < start; i++) cells.push(<div key={`b${i}`} />);
+                for (let d = 1; d <= days; d++) {
+                  const dateStr = `${calendarMonth}-${String(d).padStart(2,'0')}`;
+                  const isActive = activeSet.has(dateStr);
+                  cells.push(
+                    <button
+                      key={dateStr}
+                      onClick={() => { setSelectedDate(dateStr); selectDay(dateStr); }}
+                      className={`p-2 rounded ${isActive ? 'bg-blue-600 text-white' : 'hover:bg-gray-100'}`}
+                    >
+                      {d}
+                    </button>
+                  );
+                }
+                return cells;
+              })()}
+            </div>
+
+            {/* Day details + quick add/edit */}
+            <div className="mt-3">
+              <div className="font-semibold mb-2">{selectedDate ? `Entries for ${selectedDate}` : 'Select a date'}</div>
+              {selectedDate && (
+                <div className="space-y-2 max-h-60 overflow-auto">
+                  {selectedDayItems.length === 0 && <div className="text-sm text-gray-500">No items logged</div>}
+                  {selectedDayItems.map(item => (
+                    <div key={item.id} className="p-2 border rounded flex items-start justify-between">
+                      <div>
+                        <div className="font-medium">{item.item_name}</div>
+                        <div className="text-xs text-gray-600">{Math.round(item.calories || 0)} kcal • {item.servings || 1} serving(s)</div>
+                      </div>
+                      <div className="ml-3 flex flex-col gap-2">
+                        <button onClick={() => startEdit(item)} className="px-2 py-1 bg-blue-500 text-white rounded text-sm">Edit</button>
+                        <button onClick={() => removeItem(item.id)} className="px-2 py-1 bg-red-600 text-white rounded text-sm">Delete</button>
+                      </div>
+                    </div>
+                  ))}
+
+                  <div className="p-2 border rounded">
+                    <div className="text-sm font-medium mb-2">Add manual entry</div>
+                    <input className="w-full border px-2 py-1 mb-2" placeholder="Name" value={manualName} onChange={(e) => setManualName(e.target.value)} />
+                    <input className="w-full border px-2 py-1 mb-2" placeholder="Calories" value={manualCalories} onChange={(e) => setManualCalories(e.target.value)} />
+                    <div className="flex gap-2 mb-2">
+                      <input className="flex-1 border px-2 py-1" placeholder="Protein g" value={manualProtein} onChange={(e) => setManualProtein(e.target.value)} />
+                      <input className="flex-1 border px-2 py-1" placeholder="Carbs g" value={manualCarbs} onChange={(e) => setManualCarbs(e.target.value)} />
+                      <input className="flex-1 border px-2 py-1" placeholder="Fat g" value={manualFat} onChange={(e) => setManualFat(e.target.value)} />
+                    </div>
+                    <div className="flex gap-2">
+                      <button onClick={() => addManualToDate(selectedDate)} className="px-3 py-1 bg-green-600 text-white rounded">Add</button>
+                      <button onClick={() => { setManualName(''); setManualCalories(''); setManualProtein(''); setManualCarbs(''); setManualFat(''); setManualServings(1); }} className="px-3 py-1 border rounded">Clear</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
 
   // Main app (authenticated)
+  if (route && route.startsWith && route.startsWith('/calendar')) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 py-8 px-4">
+        <div className="max-w-5xl mx-auto">
+          <div className="bg-white rounded-lg shadow-lg w-full p-6 mb-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold">Calendar — History & Edit Logs</h3>
+              <div className="flex gap-2 items-center">
+                <button onClick={() => { const prev = new Date(calendarMonth + '-01'); prev.setMonth(prev.getMonth() - 1); setCalendarMonth(prev.toISOString().slice(0,7)); loadCalendar(prev.toISOString().slice(0,7)); }} className="px-2 py-1 border rounded">◀</button>
+                <div className="px-3 py-1 bg-gray-50 rounded">{calendarMonth}</div>
+                <button onClick={() => { const next = new Date(calendarMonth + '-01'); next.setMonth(next.getMonth() + 1); setCalendarMonth(next.toISOString().slice(0,7)); loadCalendar(next.toISOString().slice(0,7)); }} className="px-2 py-1 border rounded">▶</button>
+                <button onClick={() => navigate('/')} className="ml-4 px-3 py-1 bg-red-600 text-white rounded">Close</button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="col-span-1 bg-gray-50 p-3 rounded">
+                <h4 className="font-semibold mb-2">{new Date(calendarMonth + '-01').toLocaleString(undefined, { month: 'long', year: 'numeric' })}</h4>
+
+                {/* Full month calendar grid */}
+                <div className="grid grid-cols-7 gap-1 mb-3 text-center">
+                  {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d, i) => (
+                    <div key={`hdr-${i}`} className="text-xs text-gray-500 font-medium">{d}</div>
+                  ))}
+
+                  {(() => {
+                    const [y, m] = calendarMonth.split('-').map(Number);
+                    const year = y, monthIndex = m - 1;
+                    const first = new Date(year, monthIndex, 1);
+                    const start = first.getDay();
+                    const days = new Date(year, monthIndex + 1, 0).getDate();
+                    const cells = [];
+                    const activeSet = new Set((calendarTotals || []).map(t => t.date));
+                    for (let i = 0; i < start; i++) cells.push(<div key={`b-${i}`} />);
+                    for (let d = 1; d <= days; d++) {
+                      const dateStr = `${calendarMonth}-${String(d).padStart(2,'0')}`;
+                      const hasData = activeSet.has(dateStr);
+                      const isSelected = selectedDate === dateStr;
+                      cells.push(
+                        <button
+                          key={dateStr}
+                          onClick={() => { setSelectedDate(dateStr); selectDay(dateStr); }}
+                          className={`h-10 w-10 rounded flex items-center justify-center text-sm ${isSelected ? 'bg-blue-700 text-white' : hasData ? 'bg-blue-100 text-blue-800' : 'hover:bg-gray-100'}`}
+                          title={hasData ? `Has data: ${dateStr}` : dateStr}
+                        >
+                          {d}
+                        </button>
+                      );
+                    }
+                    while (cells.length % 7 !== 0) cells.push(<div key={`pad-${cells.length}`} />);
+                    return cells;
+                  })()}
+                </div>
+
+                <h5 className="font-semibold mb-2">Month totals</h5>
+                <div className="space-y-2 text-sm">
+                  {calendarTotals.length === 0 && <div className="text-gray-500">No data for this month</div>}
+                  {calendarTotals.map((d) => (
+                    <div key={d.date} className="flex items-center justify-between p-2 rounded hover:bg-white">
+                      <div>
+                        <div className="font-medium">{d.date}</div>
+                        <div className="text-xs text-gray-500">{Math.round(d.calories_total || 0)} kcal</div>
+                      </div>
+                      <div>
+                        <button onClick={() => { selectDay(d.date); setSelectedDate(d.date); }} className="px-2 py-1 bg-blue-600 text-white rounded text-sm">View</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="col-span-2 bg-white p-3 rounded">
+                <h4 className="font-semibold mb-2">{selectedDate ? `Entries for ${selectedDate}` : 'Select a day'}</h4>
+                {!selectedDate && <div className="text-sm text-gray-500 mb-2">Click a day from the Month totals to view or edit entries.</div>}
+                {selectedDate && (
+                  <div>
+                    <div className="space-y-3">
+                      {selectedDayItems.length === 0 && <div className="text-gray-500">No items logged</div>}
+                      {selectedDayItems.map((item) => (
+                        <div key={item.id} className="p-2 border rounded flex items-start justify-between">
+                          <div className="flex-1">
+                            {editingId === item.id ? (
+                              <div className="space-y-2">
+                                <input className="w-full border px-2 py-1" value={editFields.item_name} onChange={(e) => setEditFields({...editFields, item_name: e.target.value})} />
+                                <div className="grid grid-cols-4 gap-2 mt-1">
+                                  <input className="border px-2 py-1" value={editFields.calories} onChange={(e) => setEditFields({...editFields, calories: e.target.value})} placeholder="kcal" />
+                                  <input className="border px-2 py-1" value={editFields.protein_g} onChange={(e) => setEditFields({...editFields, protein_g: e.target.value})} placeholder="protein g" />
+                                  <input className="border px-2 py-1" value={editFields.carbs_g} onChange={(e) => setEditFields({...editFields, carbs_g: e.target.value})} placeholder="carbs g" />
+                                  <input className="border px-2 py-1" value={editFields.fat_g} onChange={(e) => setEditFields({...editFields, fat_g: e.target.value})} placeholder="fat g" />
+                                </div>
+                              </div>
+                            ) : (
+                              <div>
+                                <div className="font-medium">{item.item_name}</div>
+                                <div className="text-xs text-gray-600">{Math.round(item.calories || 0)} kcal • {item.servings || 1} serving(s)</div>
+                              </div>
+                            )}
+                          </div>
+                          <div className="ml-3 flex flex-col gap-2">
+                            {editingId === item.id ? (
+                              <>
+                                <button onClick={() => saveEdit(item.id)} className="px-2 py-1 bg-green-600 text-white rounded text-sm">Save</button>
+                                <button onClick={() => setEditingId(null)} className="px-2 py-1 border rounded text-sm">Cancel</button>
+                              </>
+                            ) : (
+                              <>
+                                <button onClick={() => startEdit(item)} className="px-2 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm">Edit</button>
+                                <button onClick={() => removeItem(item.id)} className="px-2 py-1 bg-red-600 text-white rounded text-sm">Delete</button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mt-4">
+                      <h5 className="font-semibold mb-2">Add saved/predefined food</h5>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        <div className="space-y-2">
+                          {savedLoading && <div className="text-sm text-gray-500">Loading saved foods…</div>}
+                          {savedFoods.slice(0,10).map((s) => (
+                            <div key={s.id} className="flex items-center justify-between p-2 border rounded">
+                              <div className="text-sm">
+                                <div className="font-medium">{s.name}</div>
+                                <div className="text-xs text-gray-500">{Math.round(s.calories || 0)} kcal</div>
+                              </div>
+                              <div>
+                                <button onClick={() => addSavedToDate(s, selectedDate)} className="px-2 py-1 bg-blue-600 text-white rounded text-sm">Add</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div className="p-2 border rounded">
+                          <div className="text-sm font-medium mb-2">Create saved food</div>
+                          <input className="w-full border px-2 py-1 mb-2" placeholder="Name" value={newSaved.name} onChange={(e) => setNewSaved({...newSaved, name: e.target.value})} />
+                          <input className="w-full border px-2 py-1 mb-2" placeholder="Calories" value={newSaved.calories} onChange={(e) => setNewSaved({...newSaved, calories: e.target.value})} />
+                          <input className="flex-1 border px-2 py-1" placeholder="Protein g" value={newSaved.protein_g} onChange={(e) => setNewSaved({...newSaved, protein_g: e.target.value})} />
+                          <input className="flex-1 border px-2 py-1" placeholder="Carbs g" value={newSaved.carbs_g} onChange={(e) => setNewSaved({...newSaved, carbs_g: e.target.value})} />
+                          <input className="flex-1 border px-2 py-1 mb-2" placeholder="Fat g" value={newSaved.fat_g} onChange={(e) => setNewSaved({...newSaved, fat_g: e.target.value})} />
+                          <div className="flex gap-2">
+                            <button onClick={createSavedFood} className="px-3 py-1 bg-green-600 text-white rounded">Create</button>
+                            <button onClick={() => setNewSaved({ name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', default_servings: 1 })} className="px-3 py-1 border rounded">Clear</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 py-8 px-4">
       <div className="max-w-4xl mx-auto">
-        <div className="flex justify-between items-center mb-6">
+        <div className="relative flex justify-between items-center mb-6">
           <div>
             <h1 className="text-4xl font-bold text-gray-800">🥗 Healthy Diet Tracker Assistant</h1>
             <p className="text-gray-600">Welcome, {user?.email}</p>
           </div>
           <div className="flex gap-2">
+            {/* History / Calendar button */}
+            {!profileRequired && (
+              <button
+                onClick={() => navigate('/calendar')}
+                title="View history & edit logs"
+                className="bg-white border px-3 py-2 rounded-md hover:bg-gray-50 text-gray-700"
+              >
+                📅
+              </button>
+            )}
             {!profileRequired && (
               <button
                 onClick={() => setShowProfileForm(!showProfileForm)}
@@ -820,6 +1439,21 @@ function App() {
           </p>
         )}
 
+        {/* Today summary (read-only) */}
+        {!profileRequired && (
+          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-xl font-bold">Today Summary</h2>
+              <div className="text-sm text-gray-600">{todayTotals ? `${todayTotals.calories_total || 0} kcal eaten` : 'No intake logged'} • {todayActivity ? `${todayActivity.calories_burned || 0} kcal burned` : 'No activity'}</div>
+            </div>
+            <div className="text-sm text-gray-700">
+              <div>Consumed: {Math.round(todayTotals?.calories_total || 0)} kcal</div>
+              <div>Burned: {Math.round(todayActivity?.calories_burned || 0)} kcal</div>
+              <div className="font-medium">Net: {Math.round((todayTotals?.calories_total || 0) - (todayActivity?.calories_burned || 0))} kcal</div>
+            </div>
+          </div>
+        )}
+
         {/* Meal Planning Form - Only show if profile is complete */}
         {!profileRequired && (
           <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
@@ -881,15 +1515,6 @@ function App() {
                   />
                 ))}
               </div>
-            ) : typeof response.recipes === 'string' ? (
-              // Fallback for old text-based responses
-              <div className="bg-white rounded-lg shadow-lg p-6">
-                <div className="prose max-w-none">
-                  <pre className="whitespace-pre-wrap text-sm text-gray-700 bg-gray-50 p-4 rounded-md">
-                    {response.recipes}
-                  </pre>
-                </div>
-              </div>
             ) : (
               <div className="bg-yellow-50 border border-yellow-200 text-yellow-700 px-4 py-3 rounded-md">
                 No recipes found. Please try again with different preferences.
@@ -897,8 +1522,193 @@ function App() {
             )}
           </div>
         )}
-      </div>
-    </div>
+      
+
+      {/* Calendar popup */}
+      {showCalendarPopup && (
+        <div
+          ref={popupRef}
+          className="absolute right-0 mt-12 w-96 z-50 bg-white border rounded-lg shadow-lg p-4"
+          style={{ minWidth: 360 }}
+        >
+          {/* Top: month controls */}
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  const prev = new Date(calendarMonth + '-01');
+                  prev.setMonth(prev.getMonth() - 1);
+                  setCalendarMonth(prev.toISOString().slice(0,7));
+                  loadCalendar(prev.toISOString().slice(0,7));
+                }}
+                className="px-2 py-1 border rounded"
+              >◀</button>
+              <div className="px-3 py-1 bg-gray-50 rounded text-sm">{calendarMonth}</div>
+              <button
+                onClick={() => {
+                  const next = new Date(calendarMonth + '-01');
+                  next.setMonth(next.getMonth() + 1);
+                  setCalendarMonth(next.toISOString().slice(0,7));
+                  loadCalendar(next.toISOString().slice(0,7));
+                }}
+                className="px-2 py-1 border rounded"
+              >▶</button>
+            </div>
+            <button onClick={() => setShowCalendarPopup(false)} className="text-sm text-red-600">✕</button>
+          </div>
+
+          {/* Mini month grid */}
+          <div className="grid grid-cols-7 gap-1 text-xs mb-3">
+            {['S','M','T','W','T','F','S'].map((d, idx) => (
+              <div key={`dow-${idx}`} className="text-center font-medium text-gray-500">{d}</div>
+            ))}
+            {(() => {
+              const [y, m] = calendarMonth.split('-').map(Number);
+              const year = y, monthIndex = m - 1;
+              const firstDay = new Date(year, monthIndex, 1);
+              const startDay = firstDay.getDay();
+              const totalDays = new Date(year, monthIndex + 1, 0).getDate();
+              const cells = [];
+              for (let i = 0; i < startDay; i++) cells.push(<div key={`e-${i}`} />);
+              for (let d = 1; d <= totalDays; d++) {
+                const dateStr = `${calendarMonth}-${String(d).padStart(2,'0')}`;
+                const hasData = calendarTotals.some(ct => ct.date === dateStr);
+                const isSelected = selectedDate === dateStr;
+                cells.push(
+                  <button
+                    key={dateStr}
+                    onClick={() => {
+                      selectDay(dateStr);
+                      setShowCalendarPopup(true);
+                    }}
+                    className={`h-8 w-8 rounded text-sm flex items-center justify-center ${
+                      isSelected ? 'bg-blue-700 text-white' : hasData ? 'bg-blue-100 text-blue-800' : 'hover:bg-gray-100'
+                    }`}
+                    title={hasData ? `Has data: ${dateStr}` : dateStr}
+                  >
+                    {d}
+                  </button>
+                );
+              }
+              // pad to complete grid (optional)
+              while (cells.length % 7 !== 0) cells.push(<div key={`pad-${cells.length}`} />);
+              return cells;
+            })()}
+          </div>
+
+          {/* Right: day detail */}
+          <div className="border-t pt-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="font-medium text-sm">{selectedDate ? `Entries for ${selectedDate}` : 'Select a date'}</div>
+              <div className="text-xs text-gray-500">
+                {selectedDayItems.length > 0 ? `${selectedDayItems.reduce((s,i)=> s + (i.calories||0), 0)} kcal` : ''}
+              </div>
+            </div>
+
+            {!selectedDate && <div className="text-xs text-gray-500 mb-2">Click a date to view/edit entries.</div>}
+
+            {selectedDate && (
+              <div className="space-y-2 max-h-48 overflow-auto">
+                {selectedDayItems.length === 0 && <div className="text-xs text-gray-500">No items logged</div>}
+                {selectedDayItems.map(item => (
+                  <div key={item.id} className="flex items-start justify-between p-2 border rounded">
+                    <div className="flex-1">
+                      {editingId === item.id ? (
+                        <div className="space-y-2">
+                          <input className="w-full border px-2 py-1 text-sm" value={editFields.item_name} onChange={(e) => setEditFields({...editFields, item_name: e.target.value})} />
+                          <div className="grid grid-cols-4 gap-1 mt-1">
+                            <input className="border px-1 py-1 text-xs" value={editFields.calories} onChange={(e) => setEditFields({...editFields, calories: e.target.value})} placeholder="kcal" />
+                            <input className="border px-1 py-1 text-xs" value={editFields.protein_g} onChange={(e) => setEditFields({...editFields, protein_g: e.target.value})} placeholder="protein" />
+                            <input className="border px-1 py-1 text-xs" value={editFields.carbs_g} onChange={(e) => setEditFields({...editFields, carbs_g: e.target.value})} placeholder="carbs" />
+                            <input className="border px-1 py-1 text-xs" value={editFields.fat_g} onChange={(e) => setEditFields({...editFields, fat_g: e.target.value})} placeholder="fat" />
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <div className="font-medium text-sm">{item.item_name}</div>
+                          <div className="text-xs text-gray-600">{Math.round(item.calories || 0)} kcal • {item.servings || 1} srv</div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="ml-2 flex flex-col gap-1">
+                      {editingId === item.id ? (
+                        <>
+                          <button onClick={() => saveEdit(item.id)} className="px-2 py-1 bg-green-600 text-white rounded text-xs">Save</button>
+                          <button onClick={() => setEditingId(null)} className="px-2 py-1 border rounded text-xs">Cancel</button>
+                        </>
+                      ) : (
+                        <>
+                          <button onClick={() => startEdit(item)} className="px-2 py-1 bg-blue-500 text-white rounded text-xs">Edit</button>
+                          <button onClick={() => removeItem(item.id)} className="px-2 py-1 bg-red-600 text-white rounded text-xs">Delete</button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Quick add: saved foods */}
+            {selectedDate && (
+              <>
+                <div className="mt-3 text-xs font-medium">Add saved food</div>
+                <div className="flex gap-2 mt-1 overflow-x-auto">
+                  {savedLoading && <div className="text-xs text-gray-500">Loading…</div>}
+                  {savedFoods.slice(0,6).map(s => (
+                    <div key={s.id} className="px-2 py-1 border rounded flex items-center gap-2 text-xs">
+                      <div>
+                        <div className="font-medium">{s.name}</div>
+                        <div className="text-gray-500">{Math.round(s.calories || 0)} kcal</div>
+                      </div>
+                      <button onClick={() => addSavedToDate(s, selectedDate)} className="ml-2 bg-blue-600 text-white px-2 py-1 rounded text-xs">Add</button>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Manual add small form */}
+                <div className="mt-3 border-t pt-3">
+                  <div className="text-xs font-medium mb-1">Add manual entry</div>
+                  <div className="flex gap-2">
+                    <input value={manualPopupName} onChange={(e)=>setManualPopupName(e.target.value)} placeholder="name" className="flex-1 border px-2 py-1 text-xs" />
+                    <input value={manualPopupCalories} onChange={(e)=>setManualPopupCalories(e.target.value)} placeholder="kcal" className="w-20 border px-2 py-1 text-xs" />
+                    <button
+                      onClick={async () => {
+                        if (!manualPopupName || manualPopupCalories === '') return alert('name and calories required');
+                        try {
+                          const body = {
+                            date: selectedDate || new Date().toISOString().slice(0,10),
+                            item_name: manualPopupName,
+                            calories: Number(manualPopupCalories),
+                            servings: 1,
+                            source_type: 'manual'
+                          };
+                          const res = await fetch(`${API_BASE}/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
+                          const text = await res.text();
+                          if (!text) throw new Error('Empty response');
+                          const data = JSON.parse(text);
+                          if (!res.ok) throw new Error(data.error || 'Failed');
+                          setManualPopupName(''); setManualPopupCalories('');
+                          await selectDay(selectedDate);
+                          window.dispatchEvent(new Event('logUpdated'));
+                        } catch (err) {
+                          alert('Add failed: ' + (err instanceof Error ? err.message : 'unknown'));
+                        }
+                      }}
+                      className="bg-green-600 text-white px-2 py-1 rounded text-xs"
+                    >
+                      Add
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+  </div>
+</div>
   );
 }
 
@@ -906,6 +1716,38 @@ function App() {
 function RecipeCard({ recipe, onRegenerate }) {
   const [showNutrition, setShowNutrition] = useState(false);
   const [copied, setCopied] = useState(false);
+  const nutrients = recipe.nutrients || {};
+  // Add to log handler
+  const addToLog = async () => {
+    try {
+      const servingsInput = window.prompt('Servings to add (number):', '1');
+      if (!servingsInput) return;
+      const servings = Number(servingsInput) || 1;
+      const body = {
+        date: new Date().toISOString().slice(0,10),
+        item_name: recipe.title || 'Recipe',
+        calories: (nutrients.calories != null ? Number(nutrients.calories) : 0) * servings,
+        protein_g: nutrients.protein_g != null ? Number(nutrients.protein_g) * servings : undefined,
+        carbs_g: nutrients.carbs_g != null ? Number(nutrients.carbs_g) * servings : undefined,
+        fat_g: nutrients.fat_g != null ? Number(nutrients.fat_g) * servings : undefined,
+        servings: servings,
+        source_type: 'generated_recipe'
+      };
+
+      const res = await fetch(`/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
+      const text = await res.text();
+      if (!text) throw new Error('No response');
+      const data = JSON.parse(text);
+      if (!res.ok) throw new Error(data.error || 'Failed to add to log');
+
+      // notify app to reload today's totals
+      window.dispatchEvent(new Event('logUpdated'));
+      alert('Added to daily log');
+    } catch (err) {
+      console.error('Add to log failed', err);
+      alert('Failed to add to log: ' + (err instanceof Error ? err.message : 'unknown'));
+    }
+  };
 
   const copyIngredients = () => {
     if (!recipe.ingredients || !Array.isArray(recipe.ingredients)) return;
@@ -922,7 +1764,6 @@ function RecipeCard({ recipe, onRegenerate }) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const nutrients = recipe.nutrients || {};
   const allergyWarnings = recipe.allergy_warnings || [];
 
   return (
@@ -1019,6 +1860,7 @@ function RecipeCard({ recipe, onRegenerate }) {
               {recipe.ingredients.map((ing, idx) => (
                 <li key={idx}>
                   {typeof ing === 'string' 
+                    
                     ? ing 
                     : `${ing.amount || ''} ${ing.unit || ''} ${ing.name || ''}`.trim()}
                 </li>
@@ -1084,6 +1926,12 @@ function RecipeCard({ recipe, onRegenerate }) {
             className="flex-1 bg-gray-100 text-gray-700 py-2 px-4 rounded-md font-medium hover:bg-gray-200 text-sm"
           >
             🔄 Regenerate
+          </button>
+          <button
+            onClick={addToLog}
+            className="bg-green-600 text-white py-2 px-4 rounded-md font-medium hover:bg-green-700 text-sm"
+          >
+            ➕ Add to log
           </button>
         </div>
       </div>

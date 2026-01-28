@@ -5,7 +5,26 @@ import session from 'express-session';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { authenticate, register, login, logout } from './auth.js';
-import { getProfile, updateProfile, updateSessionData, getUserById } from './db.js';
+import { writeFileSync } from 'fs';
+import {
+  getProfile,
+  updateProfile,
+  updateSessionData,
+  getUserById,
+  addIntake,
+  getIntakeByDate,
+  getIntakeTotalsByDate,
+  getIntakeCalendarTotals,
+  getActivityCalendarTotals,
+  getFrequentIntake,
+  addActivity,
+  getActivityByDate,
+  updateIntake,
+  deleteIntake,
+  addSavedFood,
+  getSavedFoods,
+  deleteSavedFood,
+} from './db.js';
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -15,7 +34,8 @@ const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, '.env') });
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+// Use PORT from environment if set; default to 4000 to avoid conflicts with frontend dev server
+const PORT = process.env.PORT || 4000;
 
 // Session configuration
 app.use(session({
@@ -31,7 +51,7 @@ app.use(session({
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'], // Frontend URL
+  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173'], // Frontend URLs (vite)
   credentials: true, // Allow cookies/sessions
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -215,31 +235,90 @@ function constructPrompt(profile, overrides = {}) {
 
 // Helper function to parse JSON from LLM response
 function parseRecipeJSON(content) {
-  // Try to extract JSON from the response (might have markdown code blocks or extra text)
-  let jsonStr = content.trim();
-  
-  // Remove markdown code blocks if present
+  // Robust JSON parsing with multiple heuristics to handle slightly malformed model output
+  let jsonStr = (content || '').trim();
+
+  // Remove surrounding markdown code fences if present
   jsonStr = jsonStr.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
-  
-  // Try to find JSON object in the response
-  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    jsonStr = jsonMatch[0];
-  }
-  
-  try {
-    const parsed = JSON.parse(jsonStr);
-    // Validate structure
-    if (parsed.recipes && Array.isArray(parsed.recipes)) {
-      return parsed.recipes;
+
+  // Remove JS/C style comments
+  jsonStr = jsonStr.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\n)\s*\/\/.*(?=\n|$)/g, '\n');
+
+  // Attempt to locate a top-level JSON object or array
+  let match = jsonStr.match(/\{[\s\S]*\}/);
+  if (!match) match = jsonStr.match(/\[[\s\S]*\]/);
+  if (match) jsonStr = match[0];
+
+  const tryParse = (str) => {
+    try {
+      return { ok: true, value: JSON.parse(str) };
+    } catch (e) {
+      return { ok: false, error: e };
     }
-    throw new Error('Invalid recipe structure');
-  } catch (error) {
-    console.error('Failed to parse JSON:', error);
-    console.error('Response content:', content.substring(0, 500));
-    // Return empty array if parsing fails
-    return [];
+  };
+
+  // 1) Try naive parse
+  let attempt = tryParse(jsonStr);
+  if (attempt.ok) {
+    const parsed = attempt.value;
+    // Accept both { recipes: [...] } and top-level array [...]
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.recipes)) return parsed.recipes;
+    // If parsed object has a single array-like property, try to use it
+    for (const v of Object.values(parsed)) {
+      if (Array.isArray(v)) return v;
+    }
   }
+
+  // 2) Remove trailing commas in arrays/objects: { ... , } or [ ... , ]
+  let cleaned = jsonStr.replace(/,\s*(?=[}\]])/g, '');
+
+  // 3) Replace single-quoted strings with double quotes where likely used for JSON
+  // This is a best-effort heuristic and may not be perfect.
+  cleaned = cleaned.replace(/'(?:[^'\\]|\\.)*'/g, (m) => {
+    // Convert outer single quotes to double quotes
+    return '"' + m.slice(1, -1).replace(/\"/g, '\\"') + '"';
+  });
+
+  // 4) Remove unescaped control characters
+  cleaned = cleaned.replace(/\p{Cc}+/gu, '');
+
+  attempt = tryParse(cleaned);
+  if (attempt.ok) {
+    const parsed = attempt.value;
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.recipes)) return parsed.recipes;
+    for (const v of Object.values(parsed)) {
+      if (Array.isArray(v)) return v;
+    }
+  }
+
+  // 5) As a last resort, try to extract JSON-like lines and join them
+  const lines = jsonStr.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const joined = lines.join('');
+  attempt = tryParse(joined);
+  if (attempt.ok) {
+    const parsed = attempt.value;
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.recipes)) return parsed.recipes;
+  }
+
+  // Log detailed diagnostics for debugging
+  console.error('Failed to parse JSON after multiple attempts. Last error:', (attempt.error || 'unknown'));
+  console.error('Original response (first 2000 chars):', String(content).slice(0, 2000));
+
+  // Write raw response to a debug file for inspection
+  try {
+    const debugName = `debug_recipe_${Date.now()}.json`;
+    const debugPath = join(__dirname, debugName);
+    writeFileSync(debugPath, String(content), 'utf8');
+    console.error('Wrote raw recipe output to', debugPath);
+  } catch (e) {
+    console.error('Failed to write debug file:', e);
+  }
+
+  // Return empty array if parsing ultimately fails
+  return [];
 }
 
 // Helper function to call Perplexity API
@@ -264,7 +343,7 @@ async function callPerplexityAPI(prompt) {
       },
     ],
     temperature: 0.7,
-    max_tokens: 1000, // Reduced to fit within credit limits (JSON is more concise than text)
+    max_tokens: 2000, // Increased to reduce truncation of recipe output
   };
 
   const headers = {
@@ -447,6 +526,7 @@ app.post('/me/plan_meal', authenticate, async (req, res) => {
     res.json({
       success: true,
       recipes: recipes,
+      raw_content: result.content,
       metadata: {
         model: result.model,
         usage: result.usage,
@@ -491,6 +571,7 @@ app.post('/api/plan_meal', async (req, res) => {
     res.json({
       success: true,
       recipes: recipes,
+      raw_content: result.content,
       metadata: {
         model: result.model,
         usage: result.usage,
@@ -572,6 +653,190 @@ app.post('/me/analyze_recipe', authenticate, async (req, res) => {
   }
 });
 
+// ==================== INTAKE / ACTIVITY ROUTES ====================
+
+// Helper to estimate calories burned from steps (very approximate)
+function estimateCaloriesFromSteps(steps = 0, weightKg = null) {
+  // Base estimate: ~0.04 kcal per step for a 70kg person (~200-300 kcal per 5000-8000 steps)
+  const basePerStep = 0.04;
+  const weightFactor = weightKg ? (Number(weightKg) / 70) : 1;
+  return Math.round(steps * basePerStep * weightFactor);
+}
+
+// POST /me/intake - log a food item
+app.post('/me/intake', authenticate, (req, res) => {
+  try {
+    const body = req.body || {};
+    const date = body.date || new Date().toISOString().slice(0, 10);
+    const item_name = body.item_name;
+    const calories = Number(body.calories);
+    if (!item_name || Number.isNaN(calories)) {
+      return res.status(400).json({ error: 'item_name and calories are required' });
+    }
+
+    const payload = {
+      date,
+      source_type: body.source_type || 'manual',
+      item_name,
+      calories,
+      protein_g: body.protein_g != null ? Number(body.protein_g) : null,
+      carbs_g: body.carbs_g != null ? Number(body.carbs_g) : null,
+      fat_g: body.fat_g != null ? Number(body.fat_g) : null,
+      servings: body.servings != null ? Number(body.servings) : 1,
+    };
+
+    const result = addIntake(req.userId, payload);
+
+    // Return created item id and today's totals
+    const totals = getIntakeTotalsByDate(req.userId, date);
+    res.status(201).json({ success: true, id: result.id, totals });
+  } catch (error) {
+    console.error('Error in POST /me/intake:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// GET /me/intake?date=YYYY-MM-DD - get items for a date + totals
+app.get('/me/intake', authenticate, (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const items = getIntakeByDate(req.userId, date);
+    const totals = getIntakeTotalsByDate(req.userId, date);
+    res.json({ success: true, date, items, totals });
+  } catch (error) {
+    console.error('Error in GET /me/intake:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// GET /me/intake/calendar?month=YYYY-MM - monthly per-day totals
+app.get('/me/intake/calendar', authenticate, (req, res) => {
+  try {
+    const month = req.query.month;
+    if (!month) return res.status(400).json({ error: 'month=YYYY-MM required' });
+    const totals = getIntakeCalendarTotals(req.userId, month);
+    res.json({ success: true, month, totals });
+  } catch (error) {
+    console.error('Error in GET /me/intake/calendar:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// GET /me/intake/frequent - recent/frequent items for quick re-log
+app.get('/me/intake/frequent', authenticate, (req, res) => {
+  try {
+    const rows = getFrequentIntake(req.userId, 30);
+    res.json({ success: true, items: rows });
+  } catch (error) {
+    console.error('Error in GET /me/intake/frequent:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Update an intake item
+app.put('/me/intake/:id', authenticate, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid id' });
+    const fields = req.body || {};
+    const result = updateIntake(req.userId, id, fields);
+    if (result.changes === 0) return res.status(404).json({ error: 'Not found or no changes' });
+    res.json({ success: true, changes: result.changes });
+  } catch (error) {
+    console.error('Error in PUT /me/intake/:id', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Delete an intake item
+app.delete('/me/intake/:id', authenticate, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid id' });
+    const result = deleteIntake(req.userId, id);
+    if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error in DELETE /me/intake/:id', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Saved foods endpoints
+app.get('/me/saved_foods', authenticate, (req, res) => {
+  try {
+    const rows = getSavedFoods(req.userId);
+    res.json({ success: true, items: rows });
+  } catch (error) {
+    console.error('Error in GET /me/saved_foods:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/me/saved_foods', authenticate, (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.name || body.calories == null) return res.status(400).json({ error: 'name and calories required' });
+    const result = addSavedFood(req.userId, {
+      name: body.name,
+      calories: Number(body.calories),
+      protein_g: body.protein_g != null ? Number(body.protein_g) : null,
+      carbs_g: body.carbs_g != null ? Number(body.carbs_g) : null,
+      fat_g: body.fat_g != null ? Number(body.fat_g) : null,
+      default_servings: body.default_servings != null ? Number(body.default_servings) : 1,
+    });
+    res.status(201).json({ success: true, id: result.id });
+  } catch (error) {
+    console.error('Error in POST /me/saved_foods:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.delete('/me/saved_foods/:id', authenticate, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'Invalid id' });
+    const result = deleteSavedFood(req.userId, id);
+    if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error in DELETE /me/saved_foods/:id', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /me/activity - log steps/activity
+app.post('/me/activity', authenticate, (req, res) => {
+  try {
+    const body = req.body || {};
+    const date = body.date || new Date().toISOString().slice(0, 10);
+    const steps = Number(body.steps) || 0;
+    const active_minutes = body.active_minutes != null ? Number(body.active_minutes) : null;
+
+    const profile = getProfile(req.userId) || {};
+    const estimatedCalories = estimateCaloriesFromSteps(steps, profile.weight_kg);
+
+    addActivity(req.userId, { date, steps, active_minutes, calories_burned: estimatedCalories });
+
+    res.status(201).json({ success: true, date, steps, calories_burned: estimatedCalories });
+  } catch (error) {
+    console.error('Error in POST /me/activity:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// GET /me/activity?date=YYYY-MM-DD - get activity for day
+app.get('/me/activity', authenticate, (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const record = getActivityByDate(req.userId, date);
+    res.json({ success: true, date, activity: record });
+  } catch (error) {
+    console.error('Error in GET /me/activity:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
@@ -591,10 +856,48 @@ app.get('/', (req, res) => {
       'POST /api/plan_meal': 'Get meal plan (legacy, no auth)',
       // Recipe Analysis
       'POST /me/analyze_recipe': 'Analyze recipe from URL (auth required)',
+  // Intake / Activity
+  'POST /me/intake': 'Log a food item (auth required)',
+  'GET /me/intake?date=YYYY-MM-DD': 'Get intake items and totals for a day (auth required)',
+  'GET /me/intake/calendar?month=YYYY-MM': 'Get per-day totals for a month (auth required)',
+  'GET /me/intake/frequent': 'Get frequent/recent foods for quick logging (auth required)',
+  'PUT /me/intake/:id': 'Update an intake item (auth required)',
+  'DELETE /me/intake/:id': 'Delete an intake item (auth required)',
+  'GET /me/saved_foods': 'List saved predefined foods (auth required)',
+  'POST /me/saved_foods': 'Create a saved food (auth required)',
+  'DELETE /me/saved_foods/:id': 'Delete a saved food (auth required)',
+  'POST /me/activity': 'Log activity/steps (auth required)',
+  'GET /me/activity?date=YYYY-MM-DD': 'Get activity for a day (auth required)',
+  'GET /me/summary?month=YYYY-MM': 'Get per-day summary (intake + burned) for a month (auth required)',
       // Health
       'GET /health': 'Health check'
     }
   });
+});
+
+// GET /me/summary?month=YYYY-MM - combined intake + activity totals per day for a month
+app.get('/me/summary', authenticate, (req, res) => {
+  try {
+    const month = req.query.month || new Date().toISOString().slice(0,7);
+    const intakeTotals = getIntakeCalendarTotals(req.userId, month) || [];
+    const activityTotals = getActivityCalendarTotals(req.userId, month) || [];
+
+    // Merge by date
+    const map = {};
+    for (const it of intakeTotals) {
+      map[it.date] = { date: it.date, calories_total: it.calories_total || 0, calories_burned: 0 };
+    }
+    for (const a of activityTotals) {
+      if (!map[a.date]) map[a.date] = { date: a.date, calories_total: 0, calories_burned: 0 };
+      map[a.date].calories_burned = a.calories_burned_total || 0;
+    }
+
+    const summary = Object.values(map).sort((x,y) => x.date.localeCompare(y.date));
+    res.json({ success: true, month, summary });
+  } catch (error) {
+    console.error('Error in GET /me/summary:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
 });
 
 // Health check endpoint

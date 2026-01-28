@@ -38,3 +38,52 @@ CREATE TABLE IF NOT EXISTS user_session_data (
 -- Create indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id);
+
+-- Daily intake logs (v1)
+CREATE TABLE IF NOT EXISTS daily_intake_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    date TEXT NOT NULL, -- YYYY-MM-DD
+    source_type TEXT CHECK(source_type IN ('generated_recipe','saved_food','manual')) DEFAULT 'manual',
+    item_name TEXT NOT NULL,
+    calories REAL NOT NULL,
+    protein_g REAL,
+    carbs_g REAL,
+    fat_g REAL,
+    servings REAL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Daily activity logs (v1)
+CREATE TABLE IF NOT EXISTS daily_activity_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    date TEXT NOT NULL, -- YYYY-MM-DD
+    steps INTEGER DEFAULT 0,
+    active_minutes INTEGER,
+    calories_burned REAL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_intake_user_date ON daily_intake_logs(user_id, date);
+CREATE INDEX IF NOT EXISTS idx_daily_activity_user_date ON daily_activity_logs(user_id, date);
+-- Ensure one activity row per user and date (for upserts)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_activity_user_date_unique ON daily_activity_logs(user_id, date);
+
+-- Saved foods (predefined user foods)
+CREATE TABLE IF NOT EXISTS saved_foods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    calories REAL NOT NULL,
+    protein_g REAL,
+    carbs_g REAL,
+    fat_g REAL,
+    default_servings REAL DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_foods_user ON saved_foods(user_id);
