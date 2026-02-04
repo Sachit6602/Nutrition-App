@@ -33,6 +33,11 @@ function App() {
   const [todayActivity, setTodayActivity] = useState(null);
   const [frequentItems, setFrequentItems] = useState([]);
   const [lastLogUpdate, setLastLogUpdate] = useState(0);
+  // Insights & AI coach
+  const [insights, setInsights] = useState(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [coachResult, setCoachResult] = useState(null);
+  const [coachLoading, setCoachLoading] = useState(false);
   // Manual logging form state
   const [manualName, setManualName] = useState('');
   const [manualCalories, setManualCalories] = useState('');
@@ -74,6 +79,45 @@ function App() {
       loadProfile();
     }
   }, [isAuthenticated]);
+
+  // Load insights when authenticated
+  useEffect(() => {
+    if (isAuthenticated && !profileRequired) loadInsights(7);
+  }, [isAuthenticated, profileRequired]);
+
+  const loadInsights = async (days = 7) => {
+    if (!isAuthenticated) return;
+    setInsightsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/me/insights?days=${days}`, { credentials: 'include' });
+      const text = await res.text();
+      if (!text) return;
+      const data = JSON.parse(text);
+      if (res.ok) setInsights(data);
+    } catch (err) {
+      console.error('Failed to load insights:', err);
+    } finally {
+      setInsightsLoading(false);
+    }
+  };
+
+  const askCoach = async (days = 7) => {
+    if (!isAuthenticated) return;
+    setCoachLoading(true);
+    setCoachResult(null);
+    try {
+      const res = await fetch(`${API_BASE}/me/coach`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ days }) });
+      const text = await res.text();
+      if (!text) throw new Error('Empty response');
+      const data = JSON.parse(text);
+      setCoachResult(data);
+    } catch (err) {
+      console.error('Coach request failed:', err);
+      setCoachResult({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setCoachLoading(false);
+    }
+  };
 
   // Populate form from profile
   useEffect(() => {
@@ -1451,6 +1495,71 @@ function App() {
               <div>Burned: {Math.round(todayActivity?.calories_burned || 0)} kcal</div>
               <div className="font-medium">Net: {Math.round((todayTotals?.calories_total || 0) - (todayActivity?.calories_burned || 0))} kcal</div>
             </div>
+          </div>
+        )}
+
+        {/* Insights Card */}
+        {!profileRequired && (
+          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-xl font-bold">Insights</h2>
+              <div className="flex gap-2 items-center">
+                <button onClick={() => loadInsights(7)} className="px-2 py-1 border rounded text-sm">Last 7d</button>
+                <button onClick={() => loadInsights(30)} className="px-2 py-1 border rounded text-sm">Last 30d</button>
+                <button onClick={() => askCoach(7)} className="px-3 py-1 bg-indigo-600 text-white rounded text-sm" disabled={coachLoading}>{coachLoading ? 'Coaching…' : 'Ask coach about last week'}</button>
+              </div>
+            </div>
+
+            {insightsLoading && <div className="text-sm text-gray-500">Loading insights…</div>}
+
+            {insights && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <div className="text-sm text-gray-700 mb-2">Averages</div>
+                  <div className="text-sm text-gray-800">
+                    <div>Calories: {insights.averages?.avg_calories ?? '-'} kcal</div>
+                    <div>Protein: {insights.averages?.avg_protein ?? '-'} g</div>
+                    <div>Carbs: {insights.averages?.avg_carbs ?? '-'} g</div>
+                    <div>Fat: {insights.averages?.avg_fat ?? '-'} g</div>
+                    <div>Steps: {insights.averages?.avg_steps ?? '-'} steps</div>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-sm text-gray-700 mb-2">Highlights</div>
+                  <div className="space-y-2 text-sm text-gray-800">
+                    {insights.insights && insights.insights.length > 0 ? (
+                      insights.insights.map((s, i) => <div key={i} className="p-2 bg-gray-50 rounded">{s}</div>)
+                    ) : (
+                      <div className="text-gray-500">No highlights yet</div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {coachResult && (
+              <div className="mt-4 p-3 border rounded bg-gray-50">
+                <div className="font-semibold mb-2">Coach Suggestions</div>
+                {coachResult.parsed ? (
+                  <div className="space-y-2 text-sm">
+                    {Array.isArray(coachResult.parsed.observations) && (
+                      <div>
+                        <div className="font-medium">Observations</div>
+                        {coachResult.parsed.observations.map((o, i) => <div key={`o${i}`} className="text-sm">• {o}</div>)}
+                      </div>
+                    )}
+                    {Array.isArray(coachResult.parsed.suggestions) && (
+                      <div>
+                        <div className="font-medium mt-2">Suggestions</div>
+                        {coachResult.parsed.suggestions.map((s, i) => <div key={`s${i}`} className="text-sm">• {s}</div>)}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <pre className="text-xs text-gray-700 whitespace-pre-wrap">{coachResult.raw || coachResult.error || JSON.stringify(coachResult, null, 2)}</pre>
+                )}
+              </div>
+            )}
           </div>
         )}
 

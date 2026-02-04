@@ -900,6 +900,129 @@ app.get('/me/summary', authenticate, (req, res) => {
   }
 });
 
+// Helper: compute aggregated insights for last N days
+function computeInsightsForDays(userId, days = 7) {
+  const results = [];
+  const today = new Date();
+  for (let i = 0; i < days; i++) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    const dateStr = d.toISOString().slice(0,10);
+    const intake = getIntakeTotalsByDate(userId, dateStr) || { calories_total: 0, protein_total: 0, carbs_total: 0, fat_total: 0 };
+    const activity = getActivityByDate(userId, dateStr) || { steps: 0, calories_burned: 0 };
+    results.push({ date: dateStr, intake, activity, weekday: d.getDay() });
+  }
+  return results.sort((a,b) => a.date.localeCompare(b.date));
+}
+
+// GET /me/insights?days=7 - basic averages and simple insights
+app.get('/me/insights', authenticate, (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+    const profile = getProfile(req.userId) || {};
+    const targets = calculate_daily_targets(profile) || {};
+
+    const rows = computeInsightsForDays(req.userId, days);
+
+    let sumCalories = 0, sumProtein = 0, sumCarbs = 0, sumFat = 0, sumSteps = 0;
+    let daysHitCalories = 0, proteinBelowWeekday = 0;
+
+    for (const r of rows) {
+      const cal = Number(r.intake.calories_total || 0);
+      const prot = Number(r.intake.protein_total || 0);
+      const carbs = Number(r.intake.carbs_total || 0);
+      const fat = Number(r.intake.fat_total || 0);
+      const steps = Number(r.activity.steps || 0);
+
+      sumCalories += cal;
+      sumProtein += prot;
+      sumCarbs += carbs;
+      sumFat += fat;
+      sumSteps += steps;
+
+      const targetCal = targets.calories || null;
+      if (targetCal != null && cal <= targetCal) daysHitCalories++;
+
+      // weekday (Mon-Fri => getDay 1..5) protein check
+      if (r.weekday >= 1 && r.weekday <= 5 && targets.protein_g != null) {
+        if (prot < Number(targets.protein_g)) proteinBelowWeekday++;
+      }
+    }
+
+    const count = rows.length || 1;
+    const averages = {
+      avg_calories: Math.round(sumCalories / count),
+      avg_protein: Math.round(sumProtein / count),
+      avg_carbs: Math.round(sumCarbs / count),
+      avg_fat: Math.round(sumFat / count),
+      avg_steps: Math.round(sumSteps / count),
+    };
+
+    const insights = [];
+    if (targets.calories) {
+      insights.push(`You hit your calorie target on ${daysHitCalories}/${count} days.`);
+    }
+    if (targets.protein_g != null) {
+      insights.push(`Protein below target on ${proteinBelowWeekday} of ${count} weekdays.`);
+    }
+
+    res.json({ success: true, days: count, averages, profile_targets: targets, insights, rows });
+  } catch (error) {
+    console.error('Error in GET /me/insights:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// POST /me/coach - generate compact stats and ask LLM for observations + suggestions
+app.post('/me/coach', authenticate, async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, Number(req.body.days) || 7));
+    const profile = getProfile(req.userId) || {};
+    const targets = calculate_daily_targets(profile) || {};
+
+    const rows = computeInsightsForDays(req.userId, days);
+
+    // Build compact stats
+    const stats = { days: rows.length, days_data: [] };
+    for (const r of rows) {
+      stats.days_data.push({ date: r.date, calories: Number(r.intake.calories_total || 0), protein: Number(r.intake.protein_total || 0), carbs: Number(r.intake.carbs_total || 0), fat: Number(r.intake.fat_total || 0), steps: Number(r.activity.steps || 0) });
+    }
+
+    // Compact summary text for LLM
+    let prompt = `You are an evidence-based nutrition coach. The user profile and compact stats are below. Provide 3-5 concise observations about patterns and exactly 3 very small, specific suggestions the user can try next week. Return ONLY valid JSON with keys \"observations\" (array) and \"suggestions\" (array).\n\n`;
+    prompt += `Profile Targets: ${targets.calories || 'N/A'} kcal/day, ${targets.protein_g || 'N/A'} g protein, ${targets.carbs_g || 'N/A'} g carbs, ${targets.fat_g || 'N/A'} g fat. Goal: ${targets.goal || 'N/A'}.\n\n`;
+    prompt += `Compact stats (last ${rows.length} days):\n`;
+    for (const d of stats.days_data) {
+      prompt += `- ${d.date}: ${d.calories} kcal, ${d.protein}g protein, ${d.carbs}g carbs, ${d.fat}g fat, ${d.steps} steps\n`;
+    }
+
+    prompt += `\nGive observations in plain, actionable language and suggestions that are specific and measurable (e.g., \"add 20g protein at breakfast\").`;
+
+    const result = await callPerplexityAPI(prompt);
+
+    // Try to parse JSON from model response
+    let parsed = null;
+    try {
+      let content = result.content || '';
+      content = content.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/i, '');
+      // Extract first JSON object
+      const m = content.match(/\{[\s\S]*\}/);
+      const jsonStr = m ? m[0] : content;
+      parsed = JSON.parse(jsonStr);
+    } catch (e) {
+      console.error('Failed to parse coach JSON:', e);
+    }
+
+    // Store session data for debugging
+    updateSessionData(req.userId, JSON.stringify({ prompt, days }), JSON.stringify(result));
+
+    res.json({ success: true, raw: result.content, parsed });
+  } catch (error) {
+    console.error('Error in POST /me/coach:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
