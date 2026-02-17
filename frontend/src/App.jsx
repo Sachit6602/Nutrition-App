@@ -1,9 +1,8 @@
+// Duplicate App component removed. Only one App function remains, with all hooks, handlers, and JSX inside.
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 // Use empty string to use relative URLs (goes through Vite proxy)
 const API_BASE = '';
-
-
 
 function App() {
   // Auth 
@@ -47,6 +46,16 @@ function App() {
   const [manualServings, setManualServings] = useState(1);
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState(null);
+
+  // --- Photo to Recipe (AI) ---
+  const [photoModalVisible, setPhotoModalVisible] = useState(false);
+  const [photoCandidates, setPhotoCandidates] = useState([]);
+  const [recipeResults, setRecipeResults] = useState([]);
+  const [recipeLoading, setRecipeLoading] = useState(false);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState(null);
+  const [selectedCandidate, setSelectedCandidate] = useState(null);
+  const imageInputRef = useRef(null);
 
   // Meal planning
   const [goals, setGoals] = useState('maintain');
@@ -98,6 +107,42 @@ function App() {
       console.error('Failed to load insights:', err);
     } finally {
       setInsightsLoading(false);
+    }
+  };
+
+  const searchRecipes = async (query) => {
+    if (!query) return;
+    setRecipeLoading(true);
+    setRecipeResults([]);
+    try {
+      const res = await fetch(`${API_BASE}/me/search_recipe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }) });
+      const text = await res.text();
+      console.debug('searchRecipes response', { status: res.status, headers: res.headers, bodySnippet: String(text).slice(0,500) });
+      const ct = (res.headers.get('content-type') || '').toLowerCase();
+      if (!text) throw new Error('Empty response');
+      if (ct.includes('application/json')) {
+        const data = JSON.parse(text);
+        if (!res.ok) throw new Error(data.error || `Search failed (status ${res.status})`);
+        // Map search results to RecipeCard shape
+        const mapped = (data.recipes || []).map(r => ({
+          title: r.title || r.name || 'Recipe',
+          source_url: r.url || r.source_url || null,
+          image_url: r.image || null,
+          daily_contribution: r.summary || null,
+          steps: r.summary ? [r.summary] : undefined,
+          source: r.source || undefined,
+        }));
+        setRecipeResults(mapped);
+      } else {
+        // Non-JSON response (likely HTML). Surface raw body for debugging.
+        throw new Error(`Non-JSON response (status ${res.status}): ${String(text).slice(0,1000)}`);
+      }
+    } catch (err) {
+      console.error('Recipe search failed:', err);
+      // Show a more helpful alert including first part of server response
+      alert('Recipe search failed: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setRecipeLoading(false);
     }
   };
 
@@ -253,6 +298,127 @@ function App() {
       setManualError(err instanceof Error ? err.message : 'Failed to add');
     } finally {
       setManualLoading(false);
+    }
+  };
+
+  // --- Photo logging helpers ---
+  const openPhotoFileDialog = () => {
+    if (imageInputRef.current) imageInputRef.current.click();
+  };
+
+  const handlePhotoFileChange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const resizedBase64 = await fileToResizedBase64(file, 1024, 0.78);
+      const dataUrl = `data:image/jpeg;base64,${resizedBase64}`;
+      setPhotoPreviewUrl(dataUrl);
+      await submitImageForAnalysis(resizedBase64);
+    } catch (err) {
+      console.error('Failed to process image:', err);
+      alert('Failed to process image for upload.');
+    }
+  };
+
+  // Resize image file to JPEG base64 to reduce upload size and normalize inputs
+  const fileToResizedBase64 = (file, maxWidth = 1024, quality = 0.8) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = (e) => reject(e);
+      reader.onload = () => {
+        const img = new Image();
+        img.onerror = (e) => reject(e);
+        img.onload = () => {
+          const scale = Math.min(1, maxWidth / img.width);
+          const w = Math.round(img.width * scale);
+          const h = Math.round(img.height * scale);
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, w, h);
+          try {
+            const dataUrl = canvas.toDataURL('image/jpeg', quality);
+            const base64 = String(dataUrl).replace(/^data:image\/(png|jpeg);base64,/, '');
+            resolve(base64);
+          } catch (err) {
+            reject(err);
+          }
+        };
+        img.src = String(reader.result);
+      };
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const submitImageForAnalysis = async (image_base64) => {
+    if (!image_base64) return;
+    setPhotoUploading(true);
+    setPhotoCandidates([]);
+    try {
+      const body = { date: new Date().toISOString().slice(0,10), image_base64 };
+      const res = await fetch(`${API_BASE}/me/intake/from_image`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
+      });
+      const text = await res.text();
+      const ct = res.headers.get('content-type') || '';
+      let data = null;
+      if (ct.includes('application/json')) {
+        try {
+          data = JSON.parse(text || '{}');
+        } catch (e) {
+          throw new Error('Invalid JSON response: ' + String(text).slice(0,500));
+        }
+      } else {
+        // Non-JSON response (likely HTML) — include a snippet for debugging
+        throw new Error(`Unexpected response content-type=${ct} status=${res.status}: ${String(text).slice(0,500)}`);
+      }
+      if (!res.ok) throw new Error(data.error || `Failed to analyze image (status ${res.status})`);
+      setPhotoCandidates(data.candidates || []);
+      setPhotoModalVisible(true);
+    } catch (err) {
+      console.error('Image analysis error:', err);
+      alert('Image analysis failed: ' + (err && err.message ? err.message : String(err)));
+    } finally {
+      setPhotoUploading(false);
+    }
+  };
+
+  const saveCandidateToDate = async (candidate, date) => {
+    try {
+      const body = {
+        date: date || new Date().toISOString().slice(0,10),
+        item_name: candidate.label,
+        calories: Number(candidate.calories || 0),
+        protein_g: candidate.protein_g != null ? Number(candidate.protein_g) : undefined,
+        carbs_g: candidate.carbs_g != null ? Number(candidate.carbs_g) : undefined,
+        fat_g: candidate.fat_g != null ? Number(candidate.fat_g) : undefined,
+        servings: 1,
+        source_type: 'generated_recipe',
+        image_url: photoPreviewUrl || null
+      };
+
+      const res = await fetch(`${API_BASE}/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
+      const txt = await res.text();
+      const ct = res.headers.get('content-type') || '';
+      let data = null;
+      if (ct.includes('application/json')) {
+        try {
+          data = JSON.parse(txt || '{}');
+        } catch (e) {
+          throw new Error('Invalid JSON response: ' + String(txt).slice(0,500));
+        }
+      } else {
+        throw new Error(`Unexpected response content-type=${ct} status=${res.status}: ${String(txt).slice(0,500)}`);
+      }
+      if (!res.ok) throw new Error(data.error || `Failed to add (status ${res.status})`);
+      setPhotoModalVisible(false);
+      setPhotoCandidates([]);
+      setPhotoPreviewUrl(null);
+      window.dispatchEvent(new Event('logUpdated'));
+    } catch (err) {
+      console.error('Save candidate error:', err);
+      alert('Save failed: ' + (err && err.message ? err.message : String(err)));
     }
   };
 
@@ -795,6 +961,23 @@ function App() {
       setError(err instanceof Error ? err.message : 'An error occurred');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Handler for 'Photo to Recipe' input (used in meal plan form)
+  const handlePhotoToRecipe = async (e) => {
+    e.preventDefault && e.preventDefault();
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const resizedBase64 = await fileToResizedBase64(file, 1024, 0.78);
+      const dataUrl = `data:image/jpeg;base64,${resizedBase64}`;
+      setPhotoPreviewUrl(dataUrl);
+      // Submit to backend for analysis and open modal when done
+      await submitImageForAnalysis(resizedBase64);
+    } catch (err) {
+      console.error('Photo to recipe failed:', err);
+      alert('Failed to analyze image: ' + (err instanceof Error ? err.message : String(err)));
     }
   };
 
@@ -1488,7 +1671,11 @@ function App() {
           <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-xl font-bold">Today Summary</h2>
-              <div className="text-sm text-gray-600">{todayTotals ? `${todayTotals.calories_total || 0} kcal eaten` : 'No intake logged'} • {todayActivity ? `${todayActivity.calories_burned || 0} kcal burned` : 'No activity'}</div>
+              <div className="flex items-center gap-3">
+                <div className="text-sm text-gray-600">{todayTotals ? `${todayTotals.calories_total || 0} kcal eaten` : 'No intake logged'} • {todayActivity ? `${todayActivity.calories_burned || 0} kcal burned` : 'No activity'}</div>
+                <button onClick={openPhotoFileDialog} className="px-3 py-1 bg-green-600 text-white rounded text-sm" disabled={!isAuthenticated || photoUploading}>{photoUploading ? 'Analyzing…' : 'Log with photo'}</button>
+                <input id="photo-input" ref={imageInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handlePhotoFileChange} />
+              </div>
             </div>
             <div className="text-sm text-gray-700">
               <div>Consumed: {Math.round(todayTotals?.calories_total || 0)} kcal</div>
@@ -1563,7 +1750,62 @@ function App() {
           </div>
         )}
 
+        {/* Photo analysis modal (shows after image is analyzed) */}
+        {photoModalVisible && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+            <div className="bg-white rounded-lg shadow-lg w-11/12 max-w-2xl p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold">Image predictions</h3>
+                <button onClick={() => { setPhotoModalVisible(false); setPhotoCandidates([]); setPhotoPreviewUrl(null); }} className="text-sm text-red-600">Close</button>
+              </div>
+              <div className="flex gap-4">
+                {photoPreviewUrl && (
+                  <div className="w-40 h-40 bg-gray-100 rounded overflow-hidden flex-shrink-0">
+                    <img src={photoPreviewUrl} alt="preview" className="w-full h-full object-cover" />
+                  </div>
+                )}
+                <div className="flex-1">
+                  <div className="text-sm text-gray-600 mb-2">Select the closest match and edit values if needed before saving.</div>
+                  <div className="space-y-2 max-h-64 overflow-auto">
+                    {photoCandidates.length === 0 && <div className="text-sm text-gray-500">No candidates found.</div>}
+                    {photoCandidates.map((c, idx) => (
+                      <div key={`pc-${idx}`} className={`p-2 border rounded ${selectedCandidate === idx ? 'bg-gray-50' : ''}`}>
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <div className="font-medium">{c.label} <span className="text-xs text-gray-500">({Math.round((c.confidence||0)*100)}%)</span></div>
+                            <div className="text-xs text-gray-600">Portion: {c.portion_text || '—'}</div>
+                          </div>
+                          <div className="text-sm text-gray-700">{Math.round(c.calories||0)} kcal</div>
+                        </div>
+                          <div className="mt-2 flex gap-2">
+                          <button onClick={() => setSelectedCandidate(idx)} className="px-2 py-1 border rounded text-xs">Select</button>
+                          <button onClick={() => saveCandidateToDate(c)} className="px-2 py-1 bg-green-600 text-white rounded text-xs">Save</button>
+                          <button onClick={() => searchRecipes(c.label)} className="px-2 py-1 border rounded text-xs">Search recipes</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {recipeLoading && <div className="mt-3 text-sm text-gray-600">Searching recipes…</div>}
+                  {recipeResults && recipeResults.length > 0 && (
+                    <div className="mt-3">
+                      <div className="font-medium">Recipe results</div>
+                      <div className="space-y-4 max-h-96 overflow-auto mt-2">
+                        <div className="grid grid-cols-1 gap-4">
+                          {recipeResults.map((r, i) => (
+                            <RecipeCard key={`r-${i}`} recipe={r} onRegenerate={() => { /* noop */ }} />
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Meal Planning Form - Only show if profile is complete */}
+
         {!profileRequired && (
           <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
             <h2 className="text-2xl font-bold mb-4 text-gray-800">Get Meal Plan</h2>
@@ -1583,14 +1825,31 @@ function App() {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
                 />
               </div>
+              <div className="flex gap-2 items-center">
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="flex-1 bg-green-600 text-white py-3 px-4 rounded-md font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {loading ? 'Searching for recipes...' : 'Get Meal Plan'}
+                </button>
+                <input
+                  type="file"
+                  accept="image/*"
+                  id="photo-to-recipe-input"
+                  style={{ display: 'none' }}
+                  onChange={handlePhotoToRecipe}
+                />
+                <button
+                  type="button"
+                  className="flex items-center gap-1 bg-blue-600 text-white py-3 px-4 rounded-md font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  onClick={() => document.getElementById('photo-to-recipe-input').click()}
+                  disabled={loading}
+                >
+                  <span role="img" aria-label="camera">📷</span> Photo to Recipe
+                </button>
+              </div>
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full bg-green-600 text-white py-3 px-4 rounded-md font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {loading ? 'Searching for recipes...' : 'Get Meal Plan'}
-              </button>
             </form>
           </div>
         )}
@@ -1631,15 +1890,26 @@ function App() {
             )}
           </div>
         )}
-      
+
 
       {/* Calendar popup */}
       {showCalendarPopup && (
-        <div
-          ref={popupRef}
-          className="absolute right-0 mt-12 w-96 z-50 bg-white border rounded-lg shadow-lg p-4"
-          style={{ minWidth: 360 }}
-        >
+        <div ref={popupRef} className="absolute right-0 mt-12 w-96 z-50 bg-white border rounded-lg shadow-lg p-4" style={{ minWidth: 360 }}>
+          {recipeLoading && <div className="mt-3 text-sm text-gray-600">Searching recipes…</div>}
+          {recipeResults && recipeResults.length > 0 && (
+            <div className="mt-3">
+              <div className="font-medium">Recipe results</div>
+              <div className="space-y-2 max-h-48 overflow-auto mt-2">
+                {recipeResults.map((r, i) => (
+                  <div key={`r-${i}`} className="p-2 border rounded">
+                    <a href={r.url} target="_blank" rel="noreferrer" className="font-medium text-sm text-blue-600">{r.title}</a>
+                    <div className="text-xs text-gray-600">{r.source || ''}</div>
+                    <div className="text-sm text-gray-700 mt-1">{r.summary}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {/* Top: month controls */}
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">

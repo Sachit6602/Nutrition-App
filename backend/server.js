@@ -25,6 +25,8 @@ import {
   getSavedFoods,
   deleteSavedFood,
 } from './db.js';
+import { analyzeFoodImage } from './cv_service.js';
+import { callOpenRouter } from './openrouter_client.js';
 
 // Get current directory for ES modules
 const __filename = fileURLToPath(import.meta.url);
@@ -56,7 +58,9 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+// Increase URL-encoded body size limit for file uploads
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Request logging middleware (for debugging)
 app.use((req, res, next) => {
@@ -653,6 +657,118 @@ app.post('/me/analyze_recipe', authenticate, async (req, res) => {
   }
 });
 
+// Search the web for recipes matching a short query/label.
+// Returns JSON: { recipes: [ { title, url, source, summary } ] }
+app.post('/search_recipe', async (req, res) => {
+  try {
+    const { query } = req.body || {};
+    if (!query) return res.status(400).json({ error: 'query is required' });
+
+    const performSearch = async (q) => {
+      const prompt = `Search the web for recipes matching the query:\n\n${String(q)}\n\nReturn ONLY valid JSON with a top-level key \"recipes\" which is an array of objects with keys: title, url, source, summary (one-paragraph). Return at most 6 results.`;
+      console.log('[DEBUG] performSearch: calling LLM for query:', String(q).slice(0,120));
+      const start = Date.now();
+      const result = await callPerplexityAPI(prompt);
+      console.log('[DEBUG] performSearch: LLM call finished in', Date.now() - start, 'ms');
+      let content = result.content || '';
+      content = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+      let parsed = {};
+      try {
+        parsed = JSON.parse(content);
+      } catch (e) {
+        const m = content.match(/\{[\s\S]*\}/);
+        const jsonStr = m ? m[0] : content;
+        try {
+          parsed = JSON.parse(jsonStr);
+        } catch (e2) {
+          // parsing failed — return debug info
+          return { recipes: [], debug: { raw: content, model: result.model } };
+        }
+      }
+      return { recipes: parsed.recipes || [], debug: { model: result.model } };
+    };
+
+    const out = await performSearch(query);
+    console.log('[DEBUG] /me/search_recipe returning results count:', (out.recipes || []).length);
+    return res.json({ success: true, recipes: out.recipes, debug: out.debug });
+  } catch (error) {
+    console.error('Error in /search_recipe:', error);
+    res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+// Also expose under /me so Vite dev proxy will forward requests from the frontend
+app.post('/me/search_recipe', async (req, res) => {
+  try {
+    const { query } = req.body || {};
+    if (!query) return res.status(400).json({ error: 'query is required' });
+    console.log('[DEBUG] /me/search_recipe called with query:', String(query).slice(0,200));
+      console.log('[DEBUG] /me/search_recipe: about to call callPerplexityAPI');
+      const prompt = `Search the web for recipes matching the query:\n\n${String(query)}\n\nReturn ONLY valid JSON with a top-level key "recipes" which is an array of objects with keys: title, url, source, summary (one-paragraph). Return at most 6 results.`;
+      const llmStart = Date.now();
+      const result = await callPerplexityAPI(prompt);
+      console.log('[DEBUG] /me/search_recipe: callPerplexityAPI returned in', Date.now() - llmStart, 'ms');
+      let content = result.content || '';
+      console.log('[DEBUG] /me/search_recipe: LLM content length:', (content || '').length);
+      console.log('[DEBUG] /me/search_recipe: LLM content snippet:', String(content).slice(0,600));
+    content = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    let parsed = {};
+    try {
+      parsed = JSON.parse(content);
+    } catch (e) {
+      console.log('[DEBUG] /me/search_recipe: JSON.parse failed, trying to extract JSON object from content');
+      const m = content.match(/\{[\s\S]*\}/);
+      const jsonStr = m ? m[0] : content;
+      console.log('[DEBUG] /me/search_recipe: extracted jsonStr snippet:', String(jsonStr).slice(0,600));
+      try {
+        parsed = JSON.parse(jsonStr);
+      } catch (e2) {
+        console.log('[DEBUG] /me/search_recipe: final JSON.parse failed:', e2 && e2.message);
+        return res.json({ success: true, recipes: [], debug: { raw: content, model: result.model } });
+      }
+    }
+    console.log('[DEBUG] /me/search_recipe: parsed.recipes length:', (parsed.recipes || []).length);
+    return res.json({ success: true, recipes: parsed.recipes || [], debug: { model: result.model } });
+  } catch (error) {
+    console.error('Error in /me/search_recipe:', error);
+    res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+// Simple debug endpoint to confirm proxy and headers
+app.get('/debug/proxy', (req, res) => {
+  res.json({ success: true, path: req.path, headers: req.headers, query: req.query });
+});
+
+// Debug helper: accept labeled images for dataset collection
+// POST /debug/label_image { image_base64, labels: ['salmon','asparagus'], filename? }
+app.post('/debug/label_image', async (req, res) => {
+  try {
+    const { image_base64, labels, filename } = req.body || {};
+    if (!image_base64 || !labels) return res.status(400).json({ error: 'image_base64 and labels are required' });
+
+    const imagesDir = join(__dirname, 'ml_dataset', 'images');
+    const annFile = join(__dirname, 'ml_dataset', 'annotations.jsonl');
+    // ensure dir exists
+    try { await fs.promises.mkdir(imagesDir, { recursive: true }); } catch (e) {}
+
+    // Normalize base64 payload
+    const dataUrl = String(image_base64);
+    const base64 = dataUrl.replace(/^data:image\/(png|jpeg|jpg);base64,/, '');
+    const fname = filename || `img_${Date.now()}.jpg`;
+    const imgPath = join(imagesDir, fname);
+    await fs.promises.writeFile(imgPath, Buffer.from(base64, 'base64'));
+
+    const entry = { image: `images/${fname}`, labels, filename: fname, timestamp: new Date().toISOString() };
+    await fs.promises.appendFile(annFile, JSON.stringify(entry) + '\n');
+
+    res.json({ success: true, saved: entry });
+  } catch (error) {
+    console.error('Error in /debug/label_image:', error);
+    res.status(500).json({ error: 'internal', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
 // ==================== INTAKE / ACTIVITY ROUTES ====================
 
 // Helper to estimate calories burned from steps (very approximate)
@@ -693,6 +809,63 @@ app.post('/me/intake', authenticate, (req, res) => {
   } catch (error) {
     console.error('Error in POST /me/intake:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// POST /me/intake/from_image - analyze an uploaded image and return candidate foods (does NOT log)
+// Allow unauthenticated access to image analysis so the photo-to-recipe
+// button works for users who haven't logged in yet. The analysis does
+// not persist any user data.
+app.post('/me/intake/from_image', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const date = body.date || new Date().toISOString().slice(0,10);
+
+    // Accept either image_base64 or image_url in the request body
+    const { image_base64, image_url } = body;
+    console.log('[DEBUG] /me/intake/from_image received:', {
+      hasImageBase64: !!image_base64,
+      imageBase64Length: image_base64 ? image_base64.length : 0,
+      hasImageUrl: !!image_url,
+      date
+    });
+    if (!image_base64 && !image_url) return res.status(400).json({ error: 'image_base64 or image_url required' });
+
+    // Call CV service (placeholder)
+    const result = await analyzeFoodImage({ image_base64, image_url });
+
+    // Map candidates to expected frontend schema
+    const candidates = (result.candidates || []).map(c => ({
+      label: c.label,
+      calories: c.calories,
+      protein_g: c.protein_g,
+      carbs_g: c.carbs_g,
+      fat_g: c.fat_g,
+      confidence: c.confidence,
+      portion_text: c.portion_text || null
+    }));
+    console.log('[DEBUG] /me/intake/from_image candidates:', candidates);
+
+    res.json({ success: true, date, candidates, debug: result.debug || null });
+  } catch (error) {
+    console.error('Error in POST /me/intake/from_image:', error);
+    res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+// DEBUG route (temporary) - unauthenticated helper to test CV responses
+app.post('/debug/analyze_image', async (req, res) => {
+  try {
+    const { image_base64, image_url } = req.body || {};
+    if (!image_base64 && !image_url) return res.status(400).json({ error: 'image_base64 or image_url required' });
+
+    // Call CV service and return full debug info for troubleshooting
+    const result = await analyzeFoodImage({ image_base64, image_url });
+
+    res.json({ success: true, candidates: result.candidates || [], debug: result.debug || null });
+  } catch (error) {
+    console.error('Error in /debug/analyze_image:', error);
+    res.status(500).json({ error: 'analyze failed', details: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -1020,6 +1193,49 @@ app.post('/me/coach', authenticate, async (req, res) => {
   } catch (error) {
     console.error('Error in POST /me/coach:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// POST /me/coach_summary - 2-step OpenRouter reasoning flow
+app.post('/me/coach_summary', authenticate, async (req, res) => {
+  try {
+    const days = Math.min(90, Math.max(1, Number(req.body.days) || 7));
+    const profile = getProfile(req.userId) || {};
+    const targets = calculate_daily_targets(profile) || {};
+
+    const rows = computeInsightsForDays(req.userId, days);
+
+    // Build compact summary for the model
+    let compact = `Profile targets: ${targets.calories || 'N/A'} kcal/day, ${targets.protein_g || 'N/A'} g protein. Goal: ${targets.goal || 'N/A'}.`;
+    compact += `\nLast ${rows.length} days:\n`;
+    for (const r of rows) {
+      compact += `- ${r.date}: ${Number(r.intake.calories_total || 0)} kcal, ${Number(r.intake.protein_total || 0)}g protein, ${Number(r.activity.steps || 0)} steps\n`;
+    }
+
+    // First call: ask for analysis with reasoning
+    const messages1 = [
+      { role: 'user', content: `You are an evidence-based nutrition coach. Here are compact stats:\n${compact}\nPlease provide concise observations and 3 specific suggestions.` }
+    ];
+
+    const first = await callOpenRouter(messages1, { withReasoning: true });
+
+    // Second call: feed back the first answer + ask it to think again
+    const messages2 = [
+      { role: 'user', content: compact },
+      { role: 'assistant', content: first.content, reasoning_details: first.reasoning_details || null },
+      { role: 'user', content: 'Are you sure? Think carefully and refine your suggestions if needed.' }
+    ];
+
+    const second = await callOpenRouter(messages2, { withReasoning: true });
+
+    // Store session data for debugging
+    updateSessionData(req.userId, JSON.stringify({ compact, days }), JSON.stringify({ first, second }));
+
+    res.json({ success: true, coach_text: second.content });
+  } catch (error) {
+    console.error('Error in POST /me/coach_summary:', error);
+    // Fallback: return a simple error message and hint
+    res.status(500).json({ error: 'Failed to generate coach summary', details: error.message });
   }
 });
 

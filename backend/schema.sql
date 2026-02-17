@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS daily_intake_logs (
     carbs_g REAL,
     fat_g REAL,
     servings REAL DEFAULT 1,
+    image_url TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );

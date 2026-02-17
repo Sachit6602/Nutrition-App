@@ -46,6 +46,15 @@ function migrateSchema() {
       if (!/duplicate column name/i.test(e.message)) throw e;
     }
   }
+  // Add image_url to intake logs if missing
+  try {
+    db.exec(`ALTER TABLE daily_intake_logs ADD COLUMN image_url TEXT`);
+    console.log('✅ Added column daily_intake_logs.image_url');
+  } catch (e) {
+    if (!/duplicate column name/i.test(e.message)) {
+      // ignore if table doesn't exist yet or other errors
+    }
+  }
 }
 
 function createTables() {
@@ -102,6 +111,7 @@ function createTables() {
       carbs_g REAL,
       fat_g REAL,
       servings REAL DEFAULT 1,
+      image_url TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -250,12 +260,12 @@ export const updateSessionData = (userId, requestJson, responseJson) => {
 };
 
 // -------------------- Intake & Activity helpers --------------------
-export const addIntake = (userId, { date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings }) => {
+export const addIntake = (userId, { date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings, image_url }) => {
   const stmt = db.prepare(`
-    INSERT INTO daily_intake_logs (user_id, date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO daily_intake_logs (user_id, date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings, image_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  const result = stmt.run(userId, date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings || 1);
+  const result = stmt.run(userId, date, source_type, item_name, calories, protein_g, carbs_g, fat_g, servings || 1, image_url || null);
   return { id: result.lastInsertRowid };
 };
 
@@ -322,7 +332,7 @@ export const getFrequentIntake = (userId, limit = 20) => {
 
 // Update an intake row (only if owned by user)
 export const updateIntake = (userId, intakeId, fields) => {
-  const allowed = ['item_name','calories','protein_g','carbs_g','fat_g','servings','source_type','date'];
+  const allowed = ['item_name','calories','protein_g','carbs_g','fat_g','servings','source_type','date','image_url'];
   const updates = [];
   const values = [];
   for (const [k,v] of Object.entries(fields)) {
