@@ -36,8 +36,8 @@ const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, '.env') });
 
 const app = express();
-// Use PORT from environment if set; default to 4000 to avoid conflicts with frontend dev server
-const PORT = process.env.PORT || 4000;
+// Use PORT from environment if set; default to 3001 (matches Vite proxy)
+const PORT = process.env.PORT || 3001;
 
 // Session configuration
 app.use(session({
@@ -144,6 +144,13 @@ function calculate_daily_targets(profile) {
     fat_g,
     carbs_g,
     goal,
+    // Optional debug fields can be safely ignored by the frontend.
+    _debug: {
+      inputs: { age: a, sex, height_cm: h, weight_kg: w, activity_level, goal, intensity_percent: intensity },
+      activity_factor: factor,
+      calorie_multiplier: override ? null : (calories / tdee),
+      used_target_calories_override: override,
+    },
   };
 }
 
@@ -419,9 +426,9 @@ app.post('/auth/login', login);
 app.post('/auth/logout', logout);
 
 // Check authentication status
-app.get('/auth/status', (req, res) => {
+app.get('/auth/status', async (req, res) => {
   if (req.session && req.session.userId) {
-    const user = getUserById(req.session.userId);
+    const user = await getUserById(req.session.userId);
     res.json({
       authenticated: true,
       user: user ? { id: user.id, email: user.email } : null
@@ -434,9 +441,9 @@ app.get('/auth/status', (req, res) => {
 // ==================== PROFILE ROUTES ====================
 
 // Get user profile
-app.get('/me/profile', authenticate, (req, res) => {
+app.get('/me/profile', authenticate, async (req, res) => {
   try {
-    const profile = getProfile(req.userId);
+    const profile = await getProfile(req.userId);
     if (!profile) {
       return res.status(404).json({ error: 'Profile not found' });
     }
@@ -448,7 +455,7 @@ app.get('/me/profile', authenticate, (req, res) => {
 });
 
 // Update user profile
-app.put('/me/profile', authenticate, (req, res) => {
+app.put('/me/profile', authenticate, async (req, res) => {
   try {
     const updateData = { ...req.body };
     
@@ -464,7 +471,7 @@ app.put('/me/profile', authenticate, (req, res) => {
       delete updateData.preferences;
     }
     
-    const updatedProfile = updateProfile(req.userId, updateData);
+    const updatedProfile = await updateProfile(req.userId, updateData);
     res.json({ success: true, profile: updatedProfile });
   } catch (error) {
     console.error('Error updating profile:', error);
@@ -473,9 +480,9 @@ app.put('/me/profile', authenticate, (req, res) => {
 });
 
 // Get calculated daily targets (BMR, TDEE, calories, macros)
-app.get('/me/targets', authenticate, (req, res) => {
+app.get('/me/targets', authenticate, async (req, res) => {
   try {
-    const profile = getProfile(req.userId);
+    const profile = await getProfile(req.userId);
     if (!profile) {
       return res.status(404).json({ error: 'Profile not found' });
     }
@@ -485,7 +492,13 @@ app.get('/me/targets', authenticate, (req, res) => {
         error: 'Cannot compute targets. Please set age, sex, height (cm), and weight (kg) in your profile.',
       });
     }
-    res.json({ success: true, targets });
+    const debug = String(req.query.debug || '') === '1';
+    if (!debug) {
+      // Remove debug payload by default to keep response stable/clean.
+      const { _debug, ...clean } = targets;
+      return res.json({ success: true, targets: clean });
+    }
+    return res.json({ success: true, targets });
   } catch (error) {
     console.error('Error getting targets:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -498,7 +511,7 @@ app.get('/me/targets', authenticate, (req, res) => {
 app.post('/me/plan_meal', authenticate, async (req, res) => {
   try {
     // Get user profile
-    const profile = getProfile(req.userId);
+    const profile = await getProfile(req.userId);
     if (!profile) {
       return res.status(404).json({ error: 'Profile not found. Please set up your profile first.' });
     }
@@ -527,7 +540,7 @@ app.post('/me/plan_meal', authenticate, async (req, res) => {
     const recipes = parseRecipeJSON(result.content);
 
     // Store session data
-    updateSessionData(
+    await updateSessionData(
       req.userId,
       JSON.stringify({ prompt, overrides }),
       JSON.stringify(result)
@@ -608,7 +621,7 @@ app.post('/me/analyze_recipe', authenticate, async (req, res) => {
     }
 
     // Get user profile
-    const profile = getProfile(req.userId);
+    const profile = await getProfile(req.userId);
     if (!profile) {
       return res.status(404).json({ error: 'Profile not found. Please set up your profile first.' });
     }
@@ -640,7 +653,7 @@ app.post('/me/analyze_recipe', authenticate, async (req, res) => {
     const result = await callPerplexityAPI(prompt);
 
     // Store session data
-    updateSessionData(
+    await updateSessionData(
       req.userId,
       JSON.stringify({ url, prompt }),
       JSON.stringify(result)
@@ -786,7 +799,7 @@ function estimateCaloriesFromSteps(steps = 0, weightKg = null) {
 }
 
 // POST /me/intake - log a food item
-app.post('/me/intake', authenticate, (req, res) => {
+app.post('/me/intake', authenticate, async (req, res) => {
   try {
     const body = req.body || {};
     const date = body.date || new Date().toISOString().slice(0, 10);
@@ -807,10 +820,10 @@ app.post('/me/intake', authenticate, (req, res) => {
       servings: body.servings != null ? Number(body.servings) : 1,
     };
 
-    const result = addIntake(req.userId, payload);
+    const result = await addIntake(req.userId, payload);
 
     // Return created item id and today's totals
-    const totals = getIntakeTotalsByDate(req.userId, date);
+    const totals = await getIntakeTotalsByDate(req.userId, date);
     res.status(201).json({ success: true, id: result.id, totals });
   } catch (error) {
     console.error('Error in POST /me/intake:', error);
@@ -876,11 +889,11 @@ app.post('/debug/analyze_image', async (req, res) => {
 });
 
 // GET /me/intake?date=YYYY-MM-DD - get items for a date + totals
-app.get('/me/intake', authenticate, (req, res) => {
+app.get('/me/intake', authenticate, async (req, res) => {
   try {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
-    const items = getIntakeByDate(req.userId, date);
-    const totals = getIntakeTotalsByDate(req.userId, date);
+    const items = await getIntakeByDate(req.userId, date);
+    const totals = await getIntakeTotalsByDate(req.userId, date);
     res.json({ success: true, date, items, totals });
   } catch (error) {
     console.error('Error in GET /me/intake:', error);
@@ -889,11 +902,11 @@ app.get('/me/intake', authenticate, (req, res) => {
 });
 
 // GET /me/intake/calendar?month=YYYY-MM - monthly per-day totals
-app.get('/me/intake/calendar', authenticate, (req, res) => {
+app.get('/me/intake/calendar', authenticate, async (req, res) => {
   try {
     const month = req.query.month;
     if (!month) return res.status(400).json({ error: 'month=YYYY-MM required' });
-    const totals = getIntakeCalendarTotals(req.userId, month);
+    const totals = await getIntakeCalendarTotals(req.userId, month);
     res.json({ success: true, month, totals });
   } catch (error) {
     console.error('Error in GET /me/intake/calendar:', error);
@@ -902,9 +915,9 @@ app.get('/me/intake/calendar', authenticate, (req, res) => {
 });
 
 // GET /me/intake/frequent - recent/frequent items for quick re-log
-app.get('/me/intake/frequent', authenticate, (req, res) => {
+app.get('/me/intake/frequent', authenticate, async (req, res) => {
   try {
-    const rows = getFrequentIntake(req.userId, 30);
+    const rows = await getFrequentIntake(req.userId, 30);
     res.json({ success: true, items: rows });
   } catch (error) {
     console.error('Error in GET /me/intake/frequent:', error);
@@ -913,12 +926,12 @@ app.get('/me/intake/frequent', authenticate, (req, res) => {
 });
 
 // Update an intake item
-app.put('/me/intake/:id', authenticate, (req, res) => {
+app.put('/me/intake/:id', authenticate, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid id' });
     const fields = req.body || {};
-    const result = updateIntake(req.userId, id, fields);
+    const result = await updateIntake(req.userId, id, fields);
     if (result.changes === 0) return res.status(404).json({ error: 'Not found or no changes' });
     res.json({ success: true, changes: result.changes });
   } catch (error) {
@@ -928,11 +941,11 @@ app.put('/me/intake/:id', authenticate, (req, res) => {
 });
 
 // Delete an intake item
-app.delete('/me/intake/:id', authenticate, (req, res) => {
+app.delete('/me/intake/:id', authenticate, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid id' });
-    const result = deleteIntake(req.userId, id);
+    const result = await deleteIntake(req.userId, id);
     if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ success: true });
   } catch (error) {
@@ -942,9 +955,9 @@ app.delete('/me/intake/:id', authenticate, (req, res) => {
 });
 
 // Saved foods endpoints
-app.get('/me/saved_foods', authenticate, (req, res) => {
+app.get('/me/saved_foods', authenticate, async (req, res) => {
   try {
-    const rows = getSavedFoods(req.userId);
+    const rows = await getSavedFoods(req.userId);
     res.json({ success: true, items: rows });
   } catch (error) {
     console.error('Error in GET /me/saved_foods:', error);
@@ -952,11 +965,11 @@ app.get('/me/saved_foods', authenticate, (req, res) => {
   }
 });
 
-app.post('/me/saved_foods', authenticate, (req, res) => {
+app.post('/me/saved_foods', authenticate, async (req, res) => {
   try {
     const body = req.body || {};
     if (!body.name || body.calories == null) return res.status(400).json({ error: 'name and calories required' });
-    const result = addSavedFood(req.userId, {
+    const result = await addSavedFood(req.userId, {
       name: body.name,
       calories: Number(body.calories),
       protein_g: body.protein_g != null ? Number(body.protein_g) : null,
@@ -971,11 +984,11 @@ app.post('/me/saved_foods', authenticate, (req, res) => {
   }
 });
 
-app.delete('/me/saved_foods/:id', authenticate, (req, res) => {
+app.delete('/me/saved_foods/:id', authenticate, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!id) return res.status(400).json({ error: 'Invalid id' });
-    const result = deleteSavedFood(req.userId, id);
+    const result = await deleteSavedFood(req.userId, id);
     if (result.changes === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ success: true });
   } catch (error) {
@@ -985,17 +998,17 @@ app.delete('/me/saved_foods/:id', authenticate, (req, res) => {
 });
 
 // POST /me/activity - log steps/activity
-app.post('/me/activity', authenticate, (req, res) => {
+app.post('/me/activity', authenticate, async (req, res) => {
   try {
     const body = req.body || {};
     const date = body.date || new Date().toISOString().slice(0, 10);
     const steps = Number(body.steps) || 0;
     const active_minutes = body.active_minutes != null ? Number(body.active_minutes) : null;
 
-    const profile = getProfile(req.userId) || {};
+    const profile = (await getProfile(req.userId)) || {};
     const estimatedCalories = estimateCaloriesFromSteps(steps, profile.weight_kg);
 
-    addActivity(req.userId, { date, steps, active_minutes, calories_burned: estimatedCalories });
+    await addActivity(req.userId, { date, steps, active_minutes, calories_burned: estimatedCalories });
 
     res.status(201).json({ success: true, date, steps, calories_burned: estimatedCalories });
   } catch (error) {
@@ -1005,10 +1018,10 @@ app.post('/me/activity', authenticate, (req, res) => {
 });
 
 // GET /me/activity?date=YYYY-MM-DD - get activity for day
-app.get('/me/activity', authenticate, (req, res) => {
+app.get('/me/activity', authenticate, async (req, res) => {
   try {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
-    const record = getActivityByDate(req.userId, date);
+    const record = await getActivityByDate(req.userId, date);
     res.json({ success: true, date, activity: record });
   } catch (error) {
     console.error('Error in GET /me/activity:', error);
@@ -1055,11 +1068,11 @@ app.get('/', (req, res) => {
 });
 
 // GET /me/summary?month=YYYY-MM - combined intake + activity totals per day for a month
-app.get('/me/summary', authenticate, (req, res) => {
+app.get('/me/summary', authenticate, async (req, res) => {
   try {
     const month = req.query.month || new Date().toISOString().slice(0,7);
-    const intakeTotals = getIntakeCalendarTotals(req.userId, month) || [];
-    const activityTotals = getActivityCalendarTotals(req.userId, month) || [];
+    const intakeTotals = (await getIntakeCalendarTotals(req.userId, month)) || [];
+    const activityTotals = (await getActivityCalendarTotals(req.userId, month)) || [];
 
     // Merge by date
     const map = {};

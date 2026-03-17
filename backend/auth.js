@@ -9,18 +9,19 @@ export const hashPassword = async (password) => {
 
 // Verify password
 export const verifyPassword = async (password, hash) => {
+  if (!password || !hash) return false;
   return await bcrypt.compare(password, hash);
 };
 
 // Authentication middleware (uses session)
-export const authenticate = (req, res, next) => {
+export const authenticate = async (req, res, next) => {
   // Check if user is logged in via session
   if (!req.session || !req.session.userId) {
     return res.status(401).json({ error: 'Not authenticated. Please login first.' });
   }
   
   // Verify user still exists
-  const user = getUserById(req.session.userId);
+  const user = await getUserById(req.session.userId);
   if (!user) {
     // Clear invalid session
     req.session.destroy();
@@ -53,7 +54,7 @@ export const register = async (req, res) => {
     
     // Check if user already exists
     console.log('Checking if user exists...');
-    const existingUser = getUserByEmail(email);
+    const existingUser = await getUserByEmail(email);
     if (existingUser) {
       console.log('User already exists:', email);
       return res.status(400).json({ error: 'Email already registered' });
@@ -63,7 +64,7 @@ export const register = async (req, res) => {
     console.log('Hashing password...');
     const passwordHash = await hashPassword(password);
     console.log('Password hashed, creating user...');
-    const user = createUser(email, passwordHash);
+    const user = await createUser(email, passwordHash);
     console.log('User created:', user.id);
     
     // Create session
@@ -112,7 +113,7 @@ export const login = async (req, res) => {
     }
     
     // Find user
-    const user = getUserByEmail(email);
+    const user = await getUserByEmail(email);
     if (!user) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
