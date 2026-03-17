@@ -1,8 +1,9 @@
 // Duplicate App component removed. Only one App function remains, with all hooks, handlers, and JSX inside.
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-// Use empty string to use relative URLs (goes through Vite proxy)
-const API_BASE = '';
+// In dev, leave empty to use Vite proxy. In prod (Vercel), set VITE_API_BASE_URL
+// to your Railway backend origin, e.g. https://nutrition-app-production-b05a.up.railway.app
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 
 function App() {
   // Auth 
@@ -2113,7 +2114,7 @@ function RecipeCard({ recipe, onRegenerate }) {
         source_type: 'generated_recipe'
       };
 
-      const res = await fetch(`/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
+      const res = await fetch(`${API_BASE}/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
       const text = await res.text();
       if (!text) throw new Error('No response');
       const data = JSON.parse(text);

@@ -39,13 +39,21 @@ const app = express();
 // Use PORT from environment if set; default to 3001 (matches Vite proxy)
 const PORT = process.env.PORT || 3001;
 
+// When deployed behind a proxy (Railway/Vercel), trust X-Forwarded-* headers
+// so secure cookies and client IPs work correctly.
+app.set('trust proxy', 1);
+
 // Session configuration
 app.use(session({
   secret: process.env.SESSION_SECRET || 'nutrition-app-secret-key-change-in-production',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: false, // Set to true if using HTTPS
+    // Cross-site cookies (Vercel frontend -> Railway backend) require:
+    // - secure: true (HTTPS)
+    // - sameSite: 'none'
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     httpOnly: true,
     maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
   }
@@ -58,7 +66,7 @@ app.use(cors({
     'http://127.0.0.1:3000',
     'http://localhost:5173',
     'http://127.0.0.1:5173',
-    'https://your-frontend-url.vercel.app' // Add deployed frontend URL
+    'https://nutrition-app-6602.vercel.app'
   ],
   credentials: true, // Allow cookies/sessions
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
