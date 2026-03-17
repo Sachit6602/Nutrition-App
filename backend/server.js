@@ -53,7 +53,13 @@ app.use(session({
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173'], // Frontend URLs (vite)
+  origin: [
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'https://your-frontend-url.vercel.app' // Add deployed frontend URL
+  ],
   credentials: true, // Allow cookies/sessions
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -665,7 +671,7 @@ app.post('/search_recipe', async (req, res) => {
     if (!query) return res.status(400).json({ error: 'query is required' });
 
     const performSearch = async (q) => {
-      const prompt = `Search the web for recipes matching the query:\n\n${String(q)}\n\nReturn ONLY valid JSON with a top-level key \"recipes\" which is an array of objects with keys: title, url, source, summary (one-paragraph). Return at most 6 results.`;
+      const prompt = `Search the web for recipes matching the query:\n\n${String(q)}\n\nReturn ONLY valid JSON with a top-level key "recipes" which is an array of objects with keys: title, url, source, summary (one-paragraph). Return at most 6 results.`;
       console.log('[DEBUG] performSearch: calling LLM for query:', String(q).slice(0,120));
       const start = Date.now();
       const result = await callPerplexityAPI(prompt);
@@ -1162,14 +1168,14 @@ app.post('/me/coach', authenticate, async (req, res) => {
     }
 
     // Compact summary text for LLM
-    let prompt = `You are an evidence-based nutrition coach. The user profile and compact stats are below. Provide 3-5 concise observations about patterns and exactly 3 very small, specific suggestions the user can try next week. Return ONLY valid JSON with keys \"observations\" (array) and \"suggestions\" (array).\n\n`;
+    let prompt = `You are an evidence-based nutrition coach. The user profile and compact stats are below. Provide 3-5 concise observations about patterns and exactly 3 very small, specific suggestions the user can try next week. Return ONLY valid JSON with keys "observations" (array) and "suggestions" (array).\n\n`;
     prompt += `Profile Targets: ${targets.calories || 'N/A'} kcal/day, ${targets.protein_g || 'N/A'} g protein, ${targets.carbs_g || 'N/A'} g carbs, ${targets.fat_g || 'N/A'} g fat. Goal: ${targets.goal || 'N/A'}.\n\n`;
     prompt += `Compact stats (last ${rows.length} days):\n`;
     for (const d of stats.days_data) {
       prompt += `- ${d.date}: ${d.calories} kcal, ${d.protein}g protein, ${d.carbs}g carbs, ${d.fat}g fat, ${d.steps} steps\n`;
     }
 
-    prompt += `\nGive observations in plain, actionable language and suggestions that are specific and measurable (e.g., \"add 20g protein at breakfast\").`;
+    prompt += `\nGive observations in plain, actionable language and suggestions that are specific and measurable (e.g., "add 20g protein at breakfast\").`;
 
     const result = await callPerplexityAPI(prompt);
 
@@ -1257,4 +1263,7 @@ app.listen(PORT, () => {
     console.log('✅ API key loaded (using OpenRouter)');
   }
 });
+
+// Export the app for serverless deployment
+export default app;
 
