@@ -23,6 +23,12 @@ Example using `psql`:
 psql "$DATABASE_URL" -f backend/schema_postgres.sql
 ```
 
+### Railway + Supabase
+
+If your backend is deployed on Railway and PostgreSQL is hosted on Supabase, do not use the direct database host if it resolves only to IPv6. Railway will fail with `ENETUNREACH` during connection attempts.
+
+Use the Supabase pooler connection string in your Railway `DATABASE_URL` instead. In Supabase, copy the Transaction or Session pooler URI from the database connection settings and use that as `DATABASE_URL` for Railway.
+
 The server now verifies that the database connection works and that the `users` and `user_profiles` tables exist before it starts listening.
 
 ## Environment Variables

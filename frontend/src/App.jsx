@@ -1,10 +1,9 @@
 // Duplicate App component removed. Only one App function remains, with all hooks, handlers, and JSX inside.
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-// In dev, leave empty to use Vite proxy.
-// In prod (Vercel), set VITE_API_BASE_URL to your Railway backend origin,
-// e.g. https://nutrition-app-production-b05a.up.railway.app
-const rawApiBase = (import.meta.env.VITE_API_BASE_URL || '').trim();
+// In development, always use the Vite proxy to reach the local backend.
+// In production, set VITE_API_BASE_URL to your deployed backend origin.
+const rawApiBase = import.meta.env.DEV ? '' : (import.meta.env.VITE_API_BASE_URL || '').trim();
 const normalizedApiBase = rawApiBase
   ? (rawApiBase.startsWith('http://') || rawApiBase.startsWith('https://') ? rawApiBase : `https://${rawApiBase}`)
   : '';

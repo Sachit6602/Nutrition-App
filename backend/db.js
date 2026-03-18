@@ -1,8 +1,64 @@
 import { Pool } from 'pg';
 import { config } from 'dotenv';
+import dns from 'node:dns/promises';
 config();
 
 const databaseUrl = process.env.DATABASE_URL;
+
+const getDatabaseHostname = () => {
+  if (!databaseUrl) {
+    return null;
+  }
+
+  try {
+    return new URL(databaseUrl).hostname;
+  } catch {
+    const protocolMatch = databaseUrl.match(/^postgres(?:ql)?:\/\//i);
+    if (!protocolMatch) {
+      return null;
+    }
+
+    const withoutProtocol = databaseUrl.slice(protocolMatch[0].length);
+    const authority = withoutProtocol.split('/')[0]?.split('?')[0] || '';
+    const hostPort = authority.includes('@') ? authority.slice(authority.lastIndexOf('@') + 1) : authority;
+
+    if (!hostPort) {
+      return null;
+    }
+
+    if (hostPort.startsWith('[')) {
+      const closingBracketIndex = hostPort.indexOf(']');
+      return closingBracketIndex === -1 ? null : hostPort.slice(1, closingBracketIndex);
+    }
+
+    return hostPort.split(':')[0] || null;
+  }
+};
+
+const assertDatabaseHostIsReachable = async () => {
+  const hostname = getDatabaseHostname();
+  if (!hostname) {
+    return;
+  }
+
+  let records;
+  try {
+    records = await dns.lookup(hostname, { all: true });
+  } catch (error) {
+    throw new Error(`Failed to resolve database host \"${hostname}\": ${error.message}`);
+  }
+
+  const hasIpv4 = records.some((record) => record.family === 4);
+  const hasIpv6 = records.some((record) => record.family === 6);
+
+  if (!hasIpv4 && hasIpv6) {
+    throw new Error(
+      `DATABASE_URL host \"${hostname}\" resolves only to IPv6 addresses. ` +
+      'This deployment needs an IPv4-reachable PostgreSQL endpoint. ' +
+      'If you are using Supabase, replace the direct host with the Supabase pooler connection string in your deployment environment variables.'
+    );
+  }
+};
 
 // Initialize PostgreSQL connection
 const pool = new Pool({
@@ -26,6 +82,8 @@ export const ensureDatabaseReady = async () => {
   if (!databaseUrl) {
     throw new Error('DATABASE_URL is not configured');
   }
+
+  await assertDatabaseHostIsReachable();
 
   await pool.query('SELECT 1');
 

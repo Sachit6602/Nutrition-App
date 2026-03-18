@@ -1300,6 +1300,10 @@ async function startServer() {
     });
   } catch (error) {
     console.error('❌ Failed to start backend:', error.message);
+    if (error?.code === 'ENETUNREACH') {
+      console.error('   DATABASE_URL points to a host this deployment cannot reach.');
+      console.error('   If you are using Supabase on Railway, switch DATABASE_URL to the Supabase pooler URI instead of the direct database host.');
+    }
     process.exit(1);
   }
 }
