@@ -1190,10 +1190,10 @@ app.post('/me/coach', authenticate, async (req, res) => {
 
     // Compact summary text for LLM
     let prompt = `You are an evidence-based nutrition coach. The user profile and compact stats are below. Provide 3-5 concise observations about patterns and exactly 3 very small, specific suggestions the user can try next week. Return ONLY valid JSON with keys "observations" (array) and "suggestions" (array).\n\n`;
-    prompt += `Profile Targets: ${targets.calories || 'N/A'} kcal/day, ${targets.protein_g || 'N/A'} g protein, ${targets.carbs_g || 'N/A'} g carbs, ${targets.fat_g || 'N/A'} g fat. Goal: ${targets.goal || 'N/A'}.\n\n`;
-    prompt += `Compact stats (last ${rows.length} days):\n`;
-    for (const d of stats.days_data) {
-      prompt += `- ${d.date}: ${d.calories} kcal, ${d.protein}g protein, ${d.carbs}g carbs, ${d.fat}g fat, ${d.steps} steps\n`;
+    prompt += `Profile Targets: ${targets.calories || 'N/A'} kcal/day, ${targets.protein_g || 'N/A'} g protein. Goal: ${targets.goal || 'N/A'}.`;
+    prompt += `\nLast ${rows.length} days:\n`;
+    for (const r of rows) {
+      prompt += `- ${r.date}: ${Number(r.intake.calories_total || 0)} kcal, ${Number(r.intake.protein_total || 0)}g protein, ${Number(r.activity.steps || 0)} steps\n`;
     }
 
     prompt += `\nGive observations in plain, actionable language and suggestions that are specific and measurable (e.g., "add 20g protein at breakfast\").`;
@@ -1268,7 +1268,13 @@ app.post('/me/coach_summary', authenticate, async (req, res) => {
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Global error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal Server Error', message: err.message });
 });
 
 // Bind explicitly to all interfaces for hosting platforms like Railway.
