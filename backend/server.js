@@ -1271,9 +1271,11 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend server running on http://localhost:${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
+// Bind explicitly to all interfaces for hosting platforms like Railway.
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`Backend server running on http://${HOST}:${PORT}`);
+  console.log(`Health check: http://${HOST}:${PORT}/health`);
   
   // Check if API key is configured
   if (!process.env.OPENROUTER_API_KEY && !process.env.PERPLEXITY_API_KEY) {

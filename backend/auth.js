@@ -1,16 +1,26 @@
-import bcrypt from 'bcrypt';
+import bcrypt from 'bcryptjs';
 import { getUserByEmail, createUser, getUserById } from './db.js';
 
 // Hash password
 export const hashPassword = async (password) => {
   const saltRounds = 10;
-  return await bcrypt.hash(password, saltRounds);
+  return await new Promise((resolve, reject) => {
+    bcrypt.hash(password, saltRounds, (err, hash) => {
+      if (err) return reject(err);
+      resolve(hash);
+    });
+  });
 };
 
 // Verify password
 export const verifyPassword = async (password, hash) => {
   if (!password || !hash) return false;
-  return await bcrypt.compare(password, hash);
+  return await new Promise((resolve, reject) => {
+    bcrypt.compare(password, hash, (err, same) => {
+      if (err) return reject(err);
+      resolve(!!same);
+    });
+  });
 };
 
 // Authentication middleware (uses session)
