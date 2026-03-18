@@ -2,9 +2,11 @@ import { Pool } from 'pg';
 import { config } from 'dotenv';
 config();
 
+const databaseUrl = process.env.DATABASE_URL;
+
 // Initialize PostgreSQL connection
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: databaseUrl,
   ssl: {
     rejectUnauthorized: false, // Required for Supabase connections
   },
@@ -17,6 +19,22 @@ export const testConnection = async () => {
     console.log('Database connected:', res.rows[0]);
   } catch (err) {
     console.error('Database connection error:', err);
+  }
+};
+
+export const ensureDatabaseReady = async () => {
+  if (!databaseUrl) {
+    throw new Error('DATABASE_URL is not configured');
+  }
+
+  await pool.query('SELECT 1');
+
+  const requiredTables = ['users', 'user_profiles'];
+  for (const tableName of requiredTables) {
+    const result = await pool.query('SELECT to_regclass($1) AS table_name', [`public.${tableName}`]);
+    if (!result.rows[0]?.table_name) {
+      throw new Error(`Required database table is missing: ${tableName}. Run backend/schema_postgres.sql against your PostgreSQL database.`);
+    }
   }
 };
 

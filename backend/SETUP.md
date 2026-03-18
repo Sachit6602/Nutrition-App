@@ -2,45 +2,42 @@
 
 ## Installation
 
-Since you already have SQLite3 installed at `C:\sqlite`, you just need to install the Node.js packages:
+Install backend dependencies:
 
 ```bash
 cd backend
 npm install
 ```
 
-This will install:
-- `better-sqlite3` - SQLite database driver for Node.js
-- `jsonwebtoken` - For JWT authentication tokens
-- `bcrypt` - For password hashing
-
 ## Database Initialization
 
-The database will be automatically created when you first run the server. The `db.js` module will:
-1. Create `app.db` in the `backend` directory
-2. Initialize all tables (users, user_profiles, user_session_data)
-3. Create necessary indexes
+This backend uses PostgreSQL in production.
 
-You can also manually initialize the database using the schema file:
+1. Create a PostgreSQL database.
+2. Run `backend/schema_postgres.sql` against that database.
+3. Set `DATABASE_URL` in your environment.
+
+Example using `psql`:
 
 ```bash
-# Using your SQLite installation
-C:\sqlite\sqlite3.exe backend\app.db < backend\schema.sql
+psql "$DATABASE_URL" -f backend/schema_postgres.sql
 ```
 
-Or just run the server - it will auto-initialize on first run.
+The server now verifies that the database connection works and that the `users` and `user_profiles` tables exist before it starts listening.
 
 ## Environment Variables
 
 Make sure your `.env` file includes:
 
 ```env
+DATABASE_URL=postgresql://user:password@host:5432/database
 OPENROUTER_API_KEY=your-key-here
 PORT=3001
 SESSION_SECRET=your-session-secret-key-change-in-production
 ```
 
 **Important**: Change `SESSION_SECRET` to a strong random string in production!
+**Important**: `DATABASE_URL` must point to a PostgreSQL database with the schema from `backend/schema_postgres.sql` applied.
 
 ## API Endpoints
 

@@ -24,6 +24,7 @@ import {
   addSavedFood,
   getSavedFoods,
   deleteSavedFood,
+  ensureDatabaseReady,
 } from './db.js';
 import { analyzeFoodImage } from './cv_service.js';
 import { callOpenRouter } from './openrouter_client.js';
@@ -1279,19 +1280,31 @@ app.use((err, req, res, next) => {
 
 // Bind explicitly to all interfaces for hosting platforms like Railway.
 const HOST = process.env.HOST || '0.0.0.0';
-app.listen(PORT, HOST, () => {
-  console.log(`Backend server running on http://${HOST}:${PORT}`);
-  console.log(`Health check: http://${HOST}:${PORT}/health`);
-  
-  // Check if API key is configured
-  if (!process.env.OPENROUTER_API_KEY && !process.env.PERPLEXITY_API_KEY) {
-    console.warn('⚠️  WARNING: OPENROUTER_API_KEY not found in .env file');
-    console.warn('   Please create backend/.env with your OpenRouter API key');
-    console.warn('   Get your key at: https://openrouter.ai/keys');
-  } else {
-    console.log('✅ API key loaded (using OpenRouter)');
+
+async function startServer() {
+  try {
+    await ensureDatabaseReady();
+    console.log('✅ Database connection verified');
+
+    app.listen(PORT, HOST, () => {
+      console.log(`Backend server running on http://${HOST}:${PORT}`);
+      console.log(`Health check: http://${HOST}:${PORT}/health`);
+
+      if (!process.env.OPENROUTER_API_KEY && !process.env.PERPLEXITY_API_KEY) {
+        console.warn('⚠️  WARNING: OPENROUTER_API_KEY not found in .env file');
+        console.warn('   Please create backend/.env with your OpenRouter API key');
+        console.warn('   Get your key at: https://openrouter.ai/keys');
+      } else {
+        console.log('✅ API key loaded (using OpenRouter)');
+      }
+    });
+  } catch (error) {
+    console.error('❌ Failed to start backend:', error.message);
+    process.exit(1);
   }
-});
+}
+
+startServer();
 
 // Export the app for serverless deployment
 export default app;
