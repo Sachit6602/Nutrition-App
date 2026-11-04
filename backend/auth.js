@@ -1,9 +1,11 @@
 // Login sessions and the register/login/logout handlers. Password hashing lives in password.js.
 import { env } from 'cloudflare:workers';
-import { createSession, createUser, deleteSession, getSessionUser, getUserByEmail } from './db.js';
+import { createSession, createUser, deleteSession, deleteUser, getSessionUser, getUserByEmail } from './db.js';
 import { b64u, hashPassword, verifyPassword } from './password.js';
 
 const MIN_PASSWORD = 8;
+// Keep in sync with TERMS_VERSION in frontend/src/Legal.jsx; stored with each account as its consent record.
+const TERMS_VERSION = '2026-11-04';
 
 // True when this key has used up its attempts (AUTH_LIMITER in wrangler.jsonc). Checked before any hashing,
 // so a flood of guesses costs no PBKDF2 CPU.
@@ -71,12 +73,16 @@ export const register = async (req, res) => {
     const { email, password } = credentials(req);
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
     if (password.length < MIN_PASSWORD) return res.status(400).json({ error: `Use a password of at least ${MIN_PASSWORD} characters.` });
+    // Consent must be an explicit yes (DPDP Act): the checkbox sends accept_terms: true.
+    if (req.body?.accept_terms !== true) {
+      return res.status(400).json({ error: 'Please confirm you are 18 or older and agree to the Terms and Privacy Policy.' });
+    }
     if (await limited(`register:${req.headers['cf-connecting-ip'] || 'local'}`)) return res.status(429).json(TOO_MANY);
     if (await getUserByEmail(email)) return res.status(400).json({ error: 'Email already registered' });
 
     let user;
     try {
-      user = await createUser(email, await hashPassword(password));
+      user = await createUser(email, await hashPassword(password), TERMS_VERSION);
     } catch (err) {
       // Two sign-ups with the same email at once: the UNIQUE constraint catches the second.
       if (/UNIQUE constraint failed/i.test(String(err?.message))) return res.status(400).json({ error: 'Email already registered' });
@@ -103,6 +109,26 @@ export const login = async (req, res) => {
     res.json({ success: true, user: { id: user.id, email: user.email }, message: 'Login successful' });
   } catch (error) {
     console.error('Login error:', error?.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// DELETE /me/account { password }: the right to erasure. Re-checks the password so a stolen session alone
+// can't wipe an account; cascades remove everything the account owns.
+export const deleteAccount = async (req, res) => {
+  try {
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!password) return res.status(400).json({ error: 'Enter your password to confirm.' });
+    if (await limited(`delete:${req.userId}`)) return res.status(429).json(TOO_MANY);
+    const user = await getUserByEmail(req.user.email);
+    if (!user || !(await verifyPassword(password, user.password_hash))) {
+      return res.status(401).json({ error: 'That password is not right.' });
+    }
+    await deleteUser(user.id);
+    res.append('Set-Cookie', `${COOKIE}=; Max-Age=0; ${cookieAttrs(req)}`);
+    res.json({ success: true, message: 'Account deleted' });
+  } catch (error) {
+    console.error('Delete account error:', error?.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 };

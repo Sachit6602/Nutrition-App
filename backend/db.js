@@ -37,14 +37,20 @@ export const getUserByEmail = (email) => one('SELECT id, email, password_hash FR
 
 export const getUserById = (id) => one('SELECT id, email, created_at FROM users WHERE id = ?1', id);
 
-// User and empty profile in one atomic batch.
-export const createUser = async (email, passwordHash) => {
+// User and empty profile in one atomic batch, with the Terms/Privacy version they agreed to.
+export const createUser = async (email, passwordHash, termsVersion) => {
   const [userRes] = await db().batch([
-    q('INSERT INTO users (email, password_hash) VALUES (?1, ?2) RETURNING id', email, passwordHash),
+    q(
+      'INSERT INTO users (email, password_hash, terms_version, terms_accepted_at) VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP) RETURNING id',
+      email, passwordHash, termsVersion,
+    ),
     q('INSERT INTO user_profiles (user_id) SELECT id FROM users WHERE email = ?1', email),
   ]);
   return { id: userRes.results[0].id, email };
 };
+
+// Removes the account and, through ON DELETE CASCADE, its sessions, profile, logs, saved foods and coach data.
+export const deleteUser = (userId) => run('DELETE FROM users WHERE id = ?1', userId);
 
 // ---------- Sessions (cookie token -> user) ----------
 const now = () => Math.floor(Date.now() / 1000);

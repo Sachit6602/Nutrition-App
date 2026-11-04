@@ -6,6 +6,7 @@ import {
   TrendDownIcon, TrendUpIcon, WarningCircleIcon,
 } from '@phosphor-icons/react';
 import { CalorieChart, MACROS, MacroMeter, RecipeCard, Ring, Sheet, Toast, fmt, parseDay } from './ui.jsx';
+import Legal from './Legal.jsx';
 
 // In development, always use the Vite proxy to reach the local backend.
 // In production, set VITE_API_BASE_URL to your deployed backend origin.
@@ -143,6 +144,12 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [user, setUser] = useState(null);
   const [showLogin, setShowLogin] = useState(true);
+  const [acceptTerms, setAcceptTerms] = useState(false);
+  // Delete account (profile drawer): asks for the password again before anything is removed.
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleteError, setDeleteError] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState(null);
   const [email, setEmail] = useState('');
@@ -482,9 +489,16 @@ function App() {
       setAuthError('Passwords do not match');
       return;
     }
+    if (!showLogin && !acceptTerms) {
+      setAuthError('Please confirm you are 18 or older and agree to the Terms and Privacy Policy.');
+      return;
+    }
     setAuthLoading(true);
     try {
-      const data = await api(showLogin ? '/auth/login' : '/auth/register', { method: 'POST', body: { email, password } });
+      const data = await api(showLogin ? '/auth/login' : '/auth/register', {
+        method: 'POST',
+        body: showLogin ? { email, password } : { email, password, accept_terms: acceptTerms },
+      });
       setIsAuthenticated(true);
       setUser(data.user);
       setEmail('');
@@ -495,6 +509,21 @@ function App() {
       setAuthError(err.message || (showLogin ? 'Login failed' : 'Registration failed'));
     } finally {
       setAuthLoading(false);
+    }
+  };
+
+  const deleteAccount = async (e) => {
+    e.preventDefault();
+    if (!deletePassword) return setDeleteError('Enter your password to confirm.');
+    setDeleteError(null);
+    setDeleting(true);
+    try {
+      await api('/me/account', { method: 'DELETE', body: { password: deletePassword } });
+      // Everything is gone server-side, including the session: start fresh on the landing page.
+      window.location.assign('/');
+    } catch (err) {
+      setDeleteError(err.message || 'Couldn’t delete the account');
+      setDeleting(false);
     }
   };
 
@@ -1206,6 +1235,11 @@ function App() {
   );
 
   // ---------- Screens ----------
+  // Legal pages work signed in or out, and before the auth check finishes.
+  if (route === '/terms' || route === '/privacy') {
+    return <Legal page={route.slice(1)} onBack={() => (window.history.length > 1 ? window.history.back() : navigate('/'))} />;
+  }
+
   if (!authChecked || (isAuthenticated && ((!profile && !profileRequired && !profileError) || !keyStatus))) return <Splash />;
 
   if (!isAuthenticated && route === '/') {
@@ -1301,6 +1335,25 @@ function App() {
                   <input id="a-confirm" type="password" autoComplete="new-password" required minLength={8} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="field" />
                 </div>
               )}
+              {!showLogin && (
+                <label htmlFor="a-terms" className="flex cursor-pointer items-start gap-3 rounded-xl bg-surface-2/60 p-3.5 text-sm leading-relaxed text-ink-2">
+                  <input
+                    id="a-terms"
+                    type="checkbox"
+                    required
+                    checked={acceptTerms}
+                    onChange={(e) => setAcceptTerms(e.target.checked)}
+                    className="mt-0.5 size-5 shrink-0 accent-[rgb(var(--accent))]"
+                  />
+                  <span>
+                    I’m 18 or older, I agree to the{' '}
+                    <a href="/terms" target="_blank" rel="noopener" className="font-medium text-accent underline-offset-2 hover:underline">Terms of Service</a>
+                    {' '}and{' '}
+                    <a href="/privacy" target="_blank" rel="noopener" className="font-medium text-accent underline-offset-2 hover:underline">Privacy Policy</a>,
+                    and I consent to my health details (like weight, allergies and food logs) being used to run the app.
+                  </span>
+                </label>
+              )}
               {authError && (
                 <p role="alert" className="flex items-start gap-2 rounded-xl bg-danger/10 px-3.5 py-3 text-sm text-danger">
                   <WarningCircleIcon size={18} className="mt-px shrink-0" />{authError}
@@ -1310,6 +1363,11 @@ function App() {
                 {authLoading ? (showLogin ? 'Signing in…' : 'Creating account…') : (showLogin ? 'Sign in' : 'Create account')}
               </button>
             </form>
+            <p className="mt-6 text-center text-xs text-ink-2">
+              <a href="/terms" className="hover:text-ink hover:underline">Terms of Service</a>
+              <span aria-hidden="true"> · </span>
+              <a href="/privacy" className="hover:text-ink hover:underline">Privacy Policy</a>
+            </p>
           </section>
         </main>
       </div>
@@ -1377,6 +1435,37 @@ function App() {
             </div>
           ) : profileForm}
         </div>
+
+        <section aria-labelledby="del-h" className="mt-10 space-y-3 rounded-2xl border border-danger/30 p-5">
+          <h3 id="del-h" className="flex items-center gap-2 text-base font-semibold text-danger">
+            <TrashIcon size={20} aria-hidden="true" />Delete account
+          </h3>
+          <p className="text-sm leading-relaxed text-ink-2">
+            Permanently removes your account, profile, food and activity logs, photos, saved foods and AI key. This can’t be undone.
+            {' '}<a href="/privacy" className="font-medium text-accent hover:underline">Privacy Policy</a>
+          </p>
+          {!deleteOpen ? (
+            <button type="button" className="btn-ghost h-10 px-4 text-sm text-danger hover:bg-danger/10" onClick={() => { setDeleteOpen(true); setDeleteError(null); }}>
+              Delete my account…
+            </button>
+          ) : (
+            <form onSubmit={deleteAccount} className="space-y-3" noValidate>
+              <div>
+                <label htmlFor="del-pw" className="label">Enter your password to confirm</label>
+                <input id="del-pw" type="password" autoComplete="current-password" value={deletePassword} onChange={(e) => { setDeletePassword(e.target.value); setDeleteError(null); }} className="field" />
+              </div>
+              {deleteError && (
+                <p role="alert" className="flex items-start gap-2 text-sm text-danger"><WarningCircleIcon size={16} className="mt-0.5 shrink-0" />{deleteError}</p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <button type="submit" disabled={deleting} className="btn h-10 bg-danger px-4 text-sm text-white hover:brightness-95">
+                  {deleting ? 'Deleting…' : 'Delete everything permanently'}
+                </button>
+                <button type="button" className="btn-quiet h-10 px-4 text-sm" onClick={() => { setDeleteOpen(false); setDeletePassword(''); setDeleteError(null); }}>Cancel</button>
+              </div>
+            </form>
+          )}
+        </section>
       </Sheet>
 
       <Sheet open={photoModalVisible} onClose={closePhoto} title="What’s on the plate">

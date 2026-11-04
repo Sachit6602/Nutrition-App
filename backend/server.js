@@ -3,7 +3,7 @@
 import express from 'express';
 import cors from 'cors';
 import { httpServerHandler } from 'cloudflare:node';
-import { authenticate, currentUser, register, login, logout } from './auth.js';
+import { authenticate, currentUser, deleteAccount, register, login, logout } from './auth.js';
 import {
   getProfile,
   updateProfile,
@@ -484,6 +484,9 @@ app.post('/auth/login', login);
 
 // Logout user
 app.post('/auth/logout', logout);
+
+// Delete the signed-in account and everything it owns (body: { password }).
+app.delete('/me/account', authenticate, deleteAccount);
 
 // Check authentication status
 app.get('/auth/status', async (req, res, next) => {

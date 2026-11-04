@@ -730,6 +730,8 @@ export default function Landing({ onSignIn, onCreateAccount }) {
           <Brand />
           <p className="flex flex-wrap items-center gap-x-4 gap-y-2">
             Track meals, hit your targets, plan what comes next.
+            <a href="/terms" className="rounded-full font-medium text-ink hover:text-accent">Terms</a>
+            <a href="/privacy" className="rounded-full font-medium text-ink hover:text-accent">Privacy</a>
             <a href={REPO_URL} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1.5 rounded-full font-medium text-ink hover:text-accent">
               <GithubLogoIcon size={16} aria-hidden="true" />GitHub
             </a>
