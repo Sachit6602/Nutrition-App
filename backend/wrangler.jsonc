@@ -1,0 +1,38 @@
+// Cloudflare Worker: Express API (server.js) + D1 database + the built frontend as static assets.
+// Local:  npm run dev (repo root). Deploy: see README "Deploy to Cloudflare".
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "nutrition-app",
+  "main": "server.js",
+  "compatibility_date": "2026-10-15",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Frontend: frontend/dist (npm run build in frontend). Unknown paths fall back to index.html for the SPA router.
+  // API prefixes run the Worker first; keep them in sync with the Vite dev proxy in frontend/vite.config.js.
+  "assets": {
+    "directory": "../frontend/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*", "/auth/*", "/me/*", "/ai/*", "/health", "/debug/*"]
+  },
+
+  // `npx wrangler d1 create nutrition-db` prints the real database_id; paste it here before deploying.
+  // Local dev ignores it and uses a SQLite file under .wrangler/.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "nutrition-db",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Throttles password guessing: 10 attempts a minute per email for login, per IP for sign-up (auth.js).
+  "ratelimits": [
+    { "name": "AUTH_LIMITER", "namespace_id": "1001", "simple": { "limit": 10, "period": 60 } }
+  ],
+
+  // Non-secret settings. Secrets (API_KEY_ENCRYPTION_KEY) go in .dev.vars locally and `wrangler secret put` remotely.
+  "vars": { "PBKDF2_ITERATIONS": "100000" },
+
+  "observability": { "enabled": true }
+}

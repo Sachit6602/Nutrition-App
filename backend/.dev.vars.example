@@ -1,0 +1,16 @@
+# Local secrets for `wrangler dev`. Copy to backend/.dev.vars (git-ignored).
+# In production set the same names with: npx wrangler secret put API_KEY_ENCRYPTION_KEY
+
+# 32-byte master key (base64 or hex) that encrypts each user's AI provider key at rest. Required for AI features.
+# Generate: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+# Changing it makes every saved key unreadable (users are asked to add their key again).
+API_KEY_ENCRYPTION_KEY=
+
+# The database is Cloudflare D1 (binding DB in wrangler.jsonc); locally it's a SQLite file under .wrangler/, no URL needed.
+# No shared AI key: each user brings their own (OpenAI, Anthropic, Gemini, OpenRouter, Groq, ...).
+
+# Optional:
+# ALLOWED_ORIGINS=https://my-frontend.example   # only if the frontend is hosted on another site
+# COOKIE_SAMESITE=none                           # same case: lets the session cookie cross sites
+# OPENAI_TEXT_MODEL=gpt-6-luna                   # per-provider model overrides, defaults in ai_client.js
+# ANTHROPIC_MODEL=claude-opus-5-5

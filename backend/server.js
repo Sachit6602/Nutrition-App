@@ -1,19 +1,18 @@
+// Cloudflare Worker entry: an Express app served through the Workers Node.js HTTP compatibility layer,
+// with D1 as the database (db.js). The same Worker serves the built frontend as static assets.
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
-import session from 'express-session';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import { authenticate, register, login, logout } from './auth.js';
-import { writeFileSync } from 'fs';
+import { httpServerHandler } from 'cloudflare:node';
+import { authenticate, currentUser, register, login, logout } from './auth.js';
 import {
   getProfile,
   updateProfile,
   updateSessionData,
-  getUserById,
   addIntake,
   getIntakeByDate,
   getIntakeTotalsByDate,
+  getIntakeTotalsRange,
+  getActivityRange,
   getIntakeCalendarTotals,
   getActivityCalendarTotals,
   getFrequentIntake,
@@ -24,65 +23,54 @@ import {
   addSavedFood,
   getSavedFoods,
   deleteSavedFood,
-  ensureDatabaseReady,
+  BadInput,
+  getUserApiKeyRecord,
+  setUserApiKey,
+  clearUserApiKey,
 } from './db.js';
 import { analyzeFoodImage } from './cv_service.js';
-import { callOpenRouter } from './openrouter_client.js';
-
-// Get current directory for ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// Load .env file from backend directory
-dotenv.config({ path: join(__dirname, '.env') });
+import { AiError, chat, detectProvider, isProvider, PROVIDERS, providerLabel, publicProviders, verifyKey } from './ai_client.js';
+import { encryptSecret, decryptSecret, vaultConfigured } from './key_vault.js';
 
 const app = express();
-// Use PORT from environment if set; default to 3001 (matches Vite proxy)
-const PORT = process.env.PORT || 3001;
-
-// When deployed behind a proxy (Railway/Vercel), trust X-Forwarded-* headers
-// so secure cookies and client IPs work correctly.
 app.set('trust proxy', 1);
 
-// Session configuration
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'nutrition-app-secret-key-change-in-production',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    // Cross-site cookies (Vercel frontend -> Railway backend) require:
-    // - secure: true (HTTPS)
-    // - sameSite: 'none'
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    httpOnly: true,
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-  }
-}));
-
-// Middleware
+// Other sites allowed to call the API with cookies. Only needed when the frontend is hosted elsewhere
+// (VITE_API_BASE_URL + COOKIE_SAMESITE=none); the Worker serves the frontend on its own origin by default.
+const allowedOrigins = () => [
+  'http://localhost:3000', 'http://127.0.0.1:3000', 'http://localhost:5173', 'http://127.0.0.1:5173',
+  ...String(process.env.ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean),
+];
+const sameOrigin = (req, origin) => {
+  try { return new URL(origin).host === req.headers.host; } catch { return false; }
+};
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    'https://nutrition-app-6602.vercel.app'
-  ],
-  credentials: true, // Allow cookies/sessions
+  origin: (origin, cb) => cb(null, !origin || allowedOrigins().includes(origin)),
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
+// CSRF guard: reject state-changing requests from foreign origins, and bodies that aren't JSON
+// (the frontend only sends JSON, and a JSON content type forces a CORS preflight).
+app.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const origin = req.headers.origin;
+  if (origin && !sameOrigin(req, origin) && !allowedOrigins().includes(origin)) {
+    return res.status(403).json({ error: 'Forbidden origin' });
+  }
+  const hasBody = Number(req.headers['content-length']) > 0 || req.headers['transfer-encoding'] !== undefined;
+  if (hasBody && !req.is('application/json')) {
+    return res.status(415).json({ error: 'Request body must be JSON' });
+  }
+  next();
+});
 app.use(express.json({ limit: '10mb' }));
-// Increase URL-encoded body size limit for file uploads
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+// Express 5 leaves req.body undefined when there is no body; handlers read req.body.x directly.
+app.use((req, res, next) => { req.body ??= {}; next(); });
 
-// Request logging middleware (for debugging)
+// Request logging middleware. Never log bodies or headers: they carry passwords, API keys and images.
 app.use((req, res, next) => {
   console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  if (req.body && Object.keys(req.body).length > 0) {
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
-  }
   next();
 });
 
@@ -173,7 +161,8 @@ function constructPrompt(profile, overrides = {}) {
     diet_type = overrides.dietType || 'none',
     preferences = overrides.preferences || {},
     userRequest = overrides.request
-  } = { ...profile, ...overrides };
+    // Only overrides the caller actually sent: an undefined key would otherwise wipe the profile's allergies.
+  } = { ...profile, ...Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined)) };
 
   let prompt = `Act as a nutrition coach. Use web search to find recipes that match the following requirements:\n\n`;
 
@@ -333,81 +322,143 @@ function parseRecipeJSON(content) {
   console.error('Failed to parse JSON after multiple attempts. Last error:', (attempt.error || 'unknown'));
   console.error('Original response (first 2000 chars):', String(content).slice(0, 2000));
 
-  // Write raw response to a debug file for inspection
-  try {
-    const debugName = `debug_recipe_${Date.now()}.json`;
-    const debugPath = join(__dirname, debugName);
-    writeFileSync(debugPath, String(content), 'utf8');
-    console.error('Wrote raw recipe output to', debugPath);
-  } catch (e) {
-    console.error('Failed to write debug file:', e);
-  }
-
   // Return empty array if parsing ultimately fails
   return [];
 }
 
-// Helper function to call Perplexity API
-async function callPerplexityAPI(prompt) {
-  const openRouterApiKey = process.env.OPENROUTER_API_KEY || process.env.PERPLEXITY_API_KEY;
-  if (!openRouterApiKey) {
-    throw new Error('OpenRouter API key not configured');
-  }
-
-  const modelName = process.env.PERPLEXITY_MODEL || 'perplexity/sonar-pro';
-  
-  const requestBody = {
-    model: modelName,
-    messages: [
-      {
-        role: 'system',
-        content: 'You are a nutrition coach and recipe expert. You MUST return ONLY valid JSON. Do not include any explanatory text, markdown formatting, or code blocks. Return pure JSON that matches the exact schema requested.',
-      },
-      {
-        role: 'user',
-        content: prompt,
-      },
-    ],
-    temperature: 0.7,
-    max_tokens: 2000, // Increased to reduce truncation of recipe output
-  };
-
-  const headers = {
-    'Authorization': `Bearer ${openRouterApiKey}`,
-    'Content-Type': 'application/json',
-  };
-  
-  if (process.env.SITE_URL) {
-    headers['HTTP-Referer'] = process.env.SITE_URL;
-  }
-  if (process.env.SITE_NAME) {
-    headers['X-Title'] = process.env.SITE_NAME;
-  }
-  
-  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: headers,
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    let errorDetails;
-    try {
-      errorDetails = JSON.parse(errorText);
-    } catch (e) {
-      errorDetails = errorText;
-    }
-    throw new Error(`Perplexity API error: ${errorDetails?.error?.message || errorDetails?.message || errorText}`);
-  }
-
-  const data = await response.json();
-  return {
-    content: data.choices?.[0]?.message?.content || 'No response received',
-    model: data.model,
-    usage: data.usage
-  };
+// Recipe / coach JSON calls on the user's own provider. Uses its web-search model when it has one
+// (OpenRouter's Perplexity, Perplexity, OpenAI search); otherwise the plain text model, told not to invent links.
+async function callPerplexityAPI(prompt, ai) {
+  const base = 'You are a nutrition coach and recipe expert. You MUST return ONLY valid JSON. Do not include any explanatory text, markdown formatting, or code blocks. Return pure JSON that matches the exact schema requested.';
+  const offline = ' You cannot browse the web in this conversation: write the recipes yourself, and set any URL field to null rather than guessing a link.';
+  const searchable = Boolean(PROVIDERS[ai.provider]?.models.search);
+  const result = await chat(ai, [
+    { role: 'system', content: base + (searchable ? '' : offline) },
+    { role: 'user', content: prompt },
+  ], { kind: 'search', temperature: 0.7, maxTokens: 2000 });
+  return { content: result.content || 'No response received', model: result.model };
 }
+
+// ==================== BRING-YOUR-OWN AI KEY (any provider in ai_client.js) ====================
+
+const VAULT_NOT_CONFIGURED = { error: "Key storage isn't configured on the server.", code: 'VAULT_NOT_CONFIGURED' };
+const keyAad = (userId) => `user:${userId}`;
+const keyStatus = (rec) => ({
+  has_key: Boolean(rec?.enc),
+  last4: rec?.enc ? rec.last4 ?? null : null,
+  updated_at: rec?.enc && rec.updated_at ? new Date(rec.updated_at).toISOString() : null,
+  provider: rec?.enc ? rec.provider || 'openrouter' : null,
+  provider_label: rec?.enc ? providerLabel(rec.provider || 'openrouter') : null,
+});
+
+// Runs after authenticate. Loads + decrypts the user's key into req.ai = { provider, apiKey }.
+async function requireApiKey(req, res, next) {
+  try {
+    if (!vaultConfigured()) return res.status(503).json(VAULT_NOT_CONFIGURED);
+    const rec = await getUserApiKeyRecord(req.userId);
+    if (!rec?.enc) {
+      return res.status(400).json({ error: 'Add your AI provider key to use AI features.', code: 'API_KEY_REQUIRED' });
+    }
+    const provider = isProvider(rec.provider) ? rec.provider : 'openrouter';
+    try {
+      req.ai = { provider, apiKey: decryptSecret(rec.enc, keyAad(req.userId)) };
+    } catch {
+      // e.g. API_KEY_ENCRYPTION_KEY was rotated; the stored blob can't be read anymore.
+      return res.status(400).json({ error: `Your saved ${providerLabel(provider)} key can't be read anymore. Add it again in Profile.`, code: 'API_KEY_REQUIRED' });
+    }
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+// Non-AI route failures: bad input (our validation or a D1 constraint) is the client's 400; anything else is a 500
+// whose details stay in the log, never in the response.
+function serverError(res, error) {
+  const msg = String(error?.message || error);
+  if (error instanceof BadInput) return res.status(400).json({ error: error.message });
+  if (/CHECK constraint failed|NOT NULL constraint failed|D1_TYPE_ERROR/i.test(msg)) return res.status(400).json({ error: 'Some of those values are not valid.' });
+  console.error('Unhandled route error:', msg);
+  return res.status(500).json({ error: 'Internal server error' });
+}
+
+// One place that turns AI failures into responses. Upstream key/credit errors map to contract codes.
+function sendAiError(res, error, where, fallback = 'Internal server error') {
+  const status = error instanceof AiError ? error.status : null;
+  const label = providerLabel(error?.provider);
+  if (error?.code === 'NO_VISION') {
+    return res.status(400).json({ error: error.message, code: 'API_KEY_NO_VISION' });
+  }
+  if (status === 401 || status === 403) {
+    return res.status(400).json({ error: `${label} rejected your saved key. Replace it in Profile.`, code: 'API_KEY_INVALID' });
+  }
+  // OpenAI and others report an empty balance as 429 "insufficient_quota"; OpenRouter uses 402.
+  if (status === 402 || (status === 429 && /quota|credit|billing|balance/i.test(error.message))) {
+    return res.status(402).json({ error: `Your ${label} account is out of credits.`, code: 'API_KEY_NO_CREDITS' });
+  }
+  if (status === 429) {
+    return res.status(429).json({ error: `${label} is rate-limiting your key. Try again in a minute.`, code: 'API_RATE_LIMITED' });
+  }
+  if (status === 422) {
+    return res.status(422).json({ error: error.message, code: 'AI_DECLINED' });
+  }
+  console.error(`Error in ${where}:`, error instanceof Error ? error.message : error);
+  return res.status(500).json({ error: fallback });
+}
+
+// Public: the providers a key can be for (labels, key links, prefixes). No secrets.
+app.get('/ai/providers', (req, res) => res.json({ providers: publicProviders() }));
+
+app.get('/me/api_key', authenticate, async (req, res) => {
+  try {
+    res.json(keyStatus(await getUserApiKeyRecord(req.userId)));
+  } catch (error) {
+    console.error('Error in GET /me/api_key:', error.message);
+    serverError(res, error);
+  }
+});
+
+app.put('/me/api_key', authenticate, async (req, res) => {
+  try {
+    const apiKey = typeof req.body?.api_key === 'string' ? req.body.api_key.trim() : '';
+    // Printable ASCII only: the key goes into an Authorization header.
+    if (apiKey.length < 20 || apiKey.length > 300 || !/^[\x21-\x7e]+$/.test(apiKey)) {
+      return res.status(400).json({ error: "That doesn't look like an API key. Paste the whole key, with no spaces.", code: 'API_KEY_FORMAT' });
+    }
+    // An explicit choice wins; otherwise the key's prefix decides (sk-or-, sk-ant-, AIza, gsk_, ...).
+    const requested = typeof req.body?.provider === 'string' ? req.body.provider : '';
+    const provider = isProvider(requested) ? requested : detectProvider(apiKey);
+    if (!provider) {
+      return res.status(400).json({ error: 'Pick which provider this key is for.', code: 'API_KEY_PROVIDER' });
+    }
+    const label = providerLabel(provider);
+    if (!vaultConfigured()) return res.status(503).json(VAULT_NOT_CONFIGURED);
+
+    const verdict = await verifyKey(provider, apiKey);
+    if (verdict === 'invalid') {
+      return res.status(400).json({ error: `${label} rejected that key. Check it, and that the provider is right.`, code: 'API_KEY_INVALID' });
+    }
+    if (verdict !== 'valid') {
+      return res.status(502).json({ error: `Couldn't reach ${label} to check the key. Try again in a moment.`, code: 'API_KEY_UNVERIFIED' });
+    }
+
+    const rec = await setUserApiKey(req.userId, encryptSecret(apiKey, keyAad(req.userId)), apiKey.slice(-4), provider);
+    res.json(keyStatus(rec));
+  } catch (error) {
+    console.error('Error in PUT /me/api_key:', error.message);
+    serverError(res, error);
+  }
+});
+
+app.delete('/me/api_key', authenticate, async (req, res) => {
+  try {
+    await clearUserApiKey(req.userId);
+    res.json(keyStatus(null));
+  } catch (error) {
+    console.error('Error in DELETE /me/api_key:', error.message);
+    serverError(res, error);
+  }
+});
 
 // ==================== AUTHENTICATION ROUTES ====================
 
@@ -423,7 +474,7 @@ app.post('/auth/register', async (req, res, next) => {
   } catch (error) {
     console.error('Unhandled error in register route:', error);
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Internal server error', details: error.message });
+      serverError(res, error);
     }
   }
 });
@@ -435,15 +486,12 @@ app.post('/auth/login', login);
 app.post('/auth/logout', logout);
 
 // Check authentication status
-app.get('/auth/status', async (req, res) => {
-  if (req.session && req.session.userId) {
-    const user = await getUserById(req.session.userId);
-    res.json({
-      authenticated: true,
-      user: user ? { id: user.id, email: user.email } : null
-    });
-  } else {
-    res.json({ authenticated: false });
+app.get('/auth/status', async (req, res, next) => {
+  try {
+    const user = await currentUser(req);
+    res.json(user ? { authenticated: true, user: { id: user.id, email: user.email } } : { authenticated: false });
+  } catch (error) {
+    next(error);
   }
 });
 
@@ -459,7 +507,7 @@ app.get('/me/profile', authenticate, async (req, res) => {
     res.json({ success: true, profile });
   } catch (error) {
     console.error('Error getting profile:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    serverError(res, error);
   }
 });
 
@@ -470,13 +518,13 @@ app.put('/me/profile', authenticate, async (req, res) => {
     
     // Convert allergies array to JSON string if provided
     if (updateData.allergies && Array.isArray(updateData.allergies)) {
-      updateData.allergies_json = JSON.stringify(updateData.allergies);
+      updateData.allergies_json = updateData.allergies; // db.js updateProfile stringifies *_json once
       delete updateData.allergies;
     }
     
     // Convert preferences object to JSON string if provided
     if (updateData.preferences && typeof updateData.preferences === 'object') {
-      updateData.preferences_json = JSON.stringify(updateData.preferences);
+      updateData.preferences_json = updateData.preferences;
       delete updateData.preferences;
     }
     
@@ -484,7 +532,7 @@ app.put('/me/profile', authenticate, async (req, res) => {
     res.json({ success: true, profile: updatedProfile });
   } catch (error) {
     console.error('Error updating profile:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    serverError(res, error);
   }
 });
 
@@ -510,14 +558,14 @@ app.get('/me/targets', authenticate, async (req, res) => {
     return res.json({ success: true, targets });
   } catch (error) {
     console.error('Error getting targets:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    serverError(res, error);
   }
 });
 
 // ==================== MEAL PLANNING ROUTES ====================
 
 // New authenticated meal planning endpoint (uses stored profile)
-app.post('/me/plan_meal', authenticate, async (req, res) => {
+app.post('/me/plan_meal', authenticate, requireApiKey, async (req, res) => {
   try {
     // Get user profile
     const profile = await getProfile(req.userId);
@@ -543,7 +591,7 @@ app.post('/me/plan_meal', authenticate, async (req, res) => {
     const prompt = constructPrompt(profile, overrides);
 
     // Call Perplexity API
-    const result = await callPerplexityAPI(prompt);
+    const result = await callPerplexityAPI(prompt, req.ai);
 
     // Parse JSON response
     const recipes = parseRecipeJSON(result.content);
@@ -565,63 +613,14 @@ app.post('/me/plan_meal', authenticate, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error in plan_meal:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      details: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-});
-
-// Legacy endpoint (backward compatibility - uses request body directly)
-app.post('/api/plan_meal', async (req, res) => {
-  try {
-    const { goals, targetCalories, allergies, preferences, request: userRequest } = req.body;
-
-    // Validate required fields
-    if (!goals) {
-      return res.status(400).json({
-        error: 'Missing required fields: goals'
-      });
-    }
-
-    // Construct prompt from request body
-    const prompt = constructPrompt({}, {
-      goal: goals,
-      targetCalories,
-      allergies: allergies || [],
-      preferences,
-      request: userRequest
-    });
-
-    // Call Perplexity API
-    const result = await callPerplexityAPI(prompt);
-
-    // Parse JSON response
-    const recipes = parseRecipeJSON(result.content);
-
-    res.json({
-      success: true,
-      recipes: recipes,
-      raw_content: result.content,
-      metadata: {
-        model: result.model,
-        usage: result.usage,
-      },
-    });
-  } catch (error) {
-    console.error('Error in plan_meal:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      details: error instanceof Error ? error.message : 'Unknown error'
-    });
+    sendAiError(res, error, 'plan_meal');
   }
 });
 
 // ==================== RECIPE ANALYSIS ROUTE ====================
 
 // Analyze recipe from URL
-app.post('/me/analyze_recipe', authenticate, async (req, res) => {
+app.post('/me/analyze_recipe', authenticate, requireApiKey, async (req, res) => {
   try {
     const { url } = req.body;
     
@@ -659,7 +658,7 @@ app.post('/me/analyze_recipe', authenticate, async (req, res) => {
     prompt += `\nFormat your response clearly with all sections labeled.`;
 
     // Call Perplexity API
-    const result = await callPerplexityAPI(prompt);
+    const result = await callPerplexityAPI(prompt, req.ai);
 
     // Store session data
     await updateSessionData(
@@ -677,125 +676,57 @@ app.post('/me/analyze_recipe', authenticate, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error in analyze_recipe:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      details: error instanceof Error ? error.message : 'Unknown error'
-    });
+    sendAiError(res, error, 'analyze_recipe');
   }
 });
 
 // Search the web for recipes matching a short query/label.
 // Returns JSON: { recipes: [ { title, url, source, summary } ] }
-app.post('/search_recipe', async (req, res) => {
+app.post('/me/search_recipe', authenticate, requireApiKey, async (req, res) => {
   try {
     const { query } = req.body || {};
     if (!query) return res.status(400).json({ error: 'query is required' });
-
-    const performSearch = async (q) => {
-      const prompt = `Search the web for recipes matching the query:\n\n${String(q)}\n\nReturn ONLY valid JSON with a top-level key "recipes" which is an array of objects with keys: title, url, source, summary (one-paragraph). Return at most 6 results.`;
-      console.log('[DEBUG] performSearch: calling LLM for query:', String(q).slice(0,120));
-      const start = Date.now();
-      const result = await callPerplexityAPI(prompt);
-      console.log('[DEBUG] performSearch: LLM call finished in', Date.now() - start, 'ms');
-      let content = result.content || '';
-      content = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-      let parsed = {};
-      try {
-        parsed = JSON.parse(content);
-      } catch (e) {
-        const m = content.match(/\{[\s\S]*\}/);
-        const jsonStr = m ? m[0] : content;
-        try {
-          parsed = JSON.parse(jsonStr);
-        } catch (e2) {
-          // parsing failed — return debug info
-          return { recipes: [], debug: { raw: content, model: result.model } };
-        }
-      }
-      return { recipes: parsed.recipes || [], debug: { model: result.model } };
-    };
-
-    const out = await performSearch(query);
-    console.log('[DEBUG] /me/search_recipe returning results count:', (out.recipes || []).length);
-    return res.json({ success: true, recipes: out.recipes, debug: out.debug });
-  } catch (error) {
-    console.error('Error in /search_recipe:', error);
-    res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-// Also expose under /me so Vite dev proxy will forward requests from the frontend
-app.post('/me/search_recipe', async (req, res) => {
-  try {
-    const { query } = req.body || {};
-    if (!query) return res.status(400).json({ error: 'query is required' });
-    console.log('[DEBUG] /me/search_recipe called with query:', String(query).slice(0,200));
-      console.log('[DEBUG] /me/search_recipe: about to call callPerplexityAPI');
-      const prompt = `Search the web for recipes matching the query:\n\n${String(query)}\n\nReturn ONLY valid JSON with a top-level key "recipes" which is an array of objects with keys: title, url, source, summary (one-paragraph). Return at most 6 results.`;
-      const llmStart = Date.now();
-      const result = await callPerplexityAPI(prompt);
-      console.log('[DEBUG] /me/search_recipe: callPerplexityAPI returned in', Date.now() - llmStart, 'ms');
-      let content = result.content || '';
-      console.log('[DEBUG] /me/search_recipe: LLM content length:', (content || '').length);
-      console.log('[DEBUG] /me/search_recipe: LLM content snippet:', String(content).slice(0,600));
-    content = content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    const prompt = `Search the web for recipes matching the query:\n\n${String(query)}\n\nReturn ONLY valid JSON with a top-level key "recipes" which is an array of objects with keys: title, url, source, summary (one-paragraph). Return at most 6 results.`;
+    const result = await callPerplexityAPI(prompt, req.ai);
+    const content = (result.content || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
     let parsed = {};
     try {
       parsed = JSON.parse(content);
     } catch (e) {
-      console.log('[DEBUG] /me/search_recipe: JSON.parse failed, trying to extract JSON object from content');
       const m = content.match(/\{[\s\S]*\}/);
-      const jsonStr = m ? m[0] : content;
-      console.log('[DEBUG] /me/search_recipe: extracted jsonStr snippet:', String(jsonStr).slice(0,600));
       try {
-        parsed = JSON.parse(jsonStr);
+        parsed = JSON.parse(m ? m[0] : content);
       } catch (e2) {
-        console.log('[DEBUG] /me/search_recipe: final JSON.parse failed:', e2 && e2.message);
         return res.json({ success: true, recipes: [], debug: { raw: content, model: result.model } });
       }
     }
-    console.log('[DEBUG] /me/search_recipe: parsed.recipes length:', (parsed.recipes || []).length);
     return res.json({ success: true, recipes: parsed.recipes || [], debug: { model: result.model } });
   } catch (error) {
-    console.error('Error in /me/search_recipe:', error);
-    res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : String(error) });
+    sendAiError(res, error, '/me/search_recipe');
   }
 });
 
-// Simple debug endpoint to confirm proxy and headers
-app.get('/debug/proxy', (req, res) => {
-  res.json({ success: true, path: req.path, headers: req.headers, query: req.query });
-});
+// Debug helpers: development only, never registered in production.
+if (process.env.NODE_ENV !== 'production') {
+  // Echo path/query/headers to confirm the dev proxy works
+  app.get('/debug/proxy', (req, res) => {
+    res.json({ success: true, path: req.path, headers: req.headers, query: req.query });
+  });
 
-// Debug helper: accept labeled images for dataset collection
-// POST /debug/label_image { image_base64, labels: ['salmon','asparagus'], filename? }
-app.post('/debug/label_image', async (req, res) => {
-  try {
-    const { image_base64, labels, filename } = req.body || {};
-    if (!image_base64 || !labels) return res.status(400).json({ error: 'image_base64 and labels are required' });
+  // (The old /debug/label_image dataset writer is gone: a Worker has no persistent disk.)
 
-    const imagesDir = join(__dirname, 'ml_dataset', 'images');
-    const annFile = join(__dirname, 'ml_dataset', 'annotations.jsonl');
-    // ensure dir exists
-    try { await fs.promises.mkdir(imagesDir, { recursive: true }); } catch (e) {}
-
-    // Normalize base64 payload
-    const dataUrl = String(image_base64);
-    const base64 = dataUrl.replace(/^data:image\/(png|jpeg|jpg);base64,/, '');
-    const fname = filename || `img_${Date.now()}.jpg`;
-    const imgPath = join(imagesDir, fname);
-    await fs.promises.writeFile(imgPath, Buffer.from(base64, 'base64'));
-
-    const entry = { image: `images/${fname}`, labels, filename: fname, timestamp: new Date().toISOString() };
-    await fs.promises.appendFile(annFile, JSON.stringify(entry) + '\n');
-
-    res.json({ success: true, saved: entry });
-  } catch (error) {
-    console.error('Error in /debug/label_image:', error);
-    res.status(500).json({ error: 'internal', details: error instanceof Error ? error.message : String(error) });
-  }
-});
+  // Test CV responses with full debug info
+  app.post('/debug/analyze_image', authenticate, requireApiKey, async (req, res) => {
+    try {
+      const { image_base64, image_url } = req.body || {};
+      if (!image_base64 && !image_url) return res.status(400).json({ error: 'image_base64 or image_url required' });
+      const result = await analyzeFoodImage({ image_base64, image_url, ai: req.ai });
+      res.json({ success: true, candidates: result.candidates || [], debug: result.debug || null });
+    } catch (error) {
+      sendAiError(res, error, '/debug/analyze_image', 'analyze failed');
+    }
+  });
+}
 
 // ==================== INTAKE / ACTIVITY ROUTES ====================
 
@@ -836,31 +767,21 @@ app.post('/me/intake', authenticate, async (req, res) => {
     res.status(201).json({ success: true, id: result.id, totals });
   } catch (error) {
     console.error('Error in POST /me/intake:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    serverError(res, error);
   }
 });
 
 // POST /me/intake/from_image - analyze an uploaded image and return candidate foods (does NOT log)
-// Allow unauthenticated access to image analysis so the photo-to-recipe
-// button works for users who haven't logged in yet. The analysis does
-// not persist any user data.
-app.post('/me/intake/from_image', async (req, res) => {
+app.post('/me/intake/from_image', authenticate, requireApiKey, async (req, res) => {
   try {
     const body = req.body || {};
     const date = body.date || new Date().toISOString().slice(0,10);
 
     // Accept either image_base64 or image_url in the request body
     const { image_base64, image_url } = body;
-    console.log('[DEBUG] /me/intake/from_image received:', {
-      hasImageBase64: !!image_base64,
-      imageBase64Length: image_base64 ? image_base64.length : 0,
-      hasImageUrl: !!image_url,
-      date
-    });
     if (!image_base64 && !image_url) return res.status(400).json({ error: 'image_base64 or image_url required' });
 
-    // Call CV service (placeholder)
-    const result = await analyzeFoodImage({ image_base64, image_url });
+    const result = await analyzeFoodImage({ image_base64, image_url, ai: req.ai });
 
     // Map candidates to expected frontend schema
     const candidates = (result.candidates || []).map(c => ({
@@ -872,28 +793,10 @@ app.post('/me/intake/from_image', async (req, res) => {
       confidence: c.confidence,
       portion_text: c.portion_text || null
     }));
-    console.log('[DEBUG] /me/intake/from_image candidates:', candidates);
 
     res.json({ success: true, date, candidates, debug: result.debug || null });
   } catch (error) {
-    console.error('Error in POST /me/intake/from_image:', error);
-    res.status(500).json({ error: 'Internal server error', details: error instanceof Error ? error.message : String(error) });
-  }
-});
-
-// DEBUG route (temporary) - unauthenticated helper to test CV responses
-app.post('/debug/analyze_image', async (req, res) => {
-  try {
-    const { image_base64, image_url } = req.body || {};
-    if (!image_base64 && !image_url) return res.status(400).json({ error: 'image_base64 or image_url required' });
-
-    // Call CV service and return full debug info for troubleshooting
-    const result = await analyzeFoodImage({ image_base64, image_url });
-
-    res.json({ success: true, candidates: result.candidates || [], debug: result.debug || null });
-  } catch (error) {
-    console.error('Error in /debug/analyze_image:', error);
-    res.status(500).json({ error: 'analyze failed', details: error instanceof Error ? error.message : String(error) });
+    sendAiError(res, error, 'POST /me/intake/from_image');
   }
 });
 
@@ -906,7 +809,7 @@ app.get('/me/intake', authenticate, async (req, res) => {
     res.json({ success: true, date, items, totals });
   } catch (error) {
     console.error('Error in GET /me/intake:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    serverError(res, error);
   }
 });
 
@@ -919,7 +822,7 @@ app.get('/me/intake/calendar', authenticate, async (req, res) => {
     res.json({ success: true, month, totals });
   } catch (error) {
     console.error('Error in GET /me/intake/calendar:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    serverError(res, error);
   }
 });
 
@@ -930,7 +833,7 @@ app.get('/me/intake/frequent', authenticate, async (req, res) => {
     res.json({ success: true, items: rows });
   } catch (error) {
     console.error('Error in GET /me/intake/frequent:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    serverError(res, error);
   }
 });
 
@@ -945,7 +848,7 @@ app.put('/me/intake/:id', authenticate, async (req, res) => {
     res.json({ success: true, changes: result.changes });
   } catch (error) {
     console.error('Error in PUT /me/intake/:id', error);
-    res.status(500).json({ error: 'Internal server error' });
+    serverError(res, error);
   }
 });
 
@@ -959,7 +862,7 @@ app.delete('/me/intake/:id', authenticate, async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Error in DELETE /me/intake/:id', error);
-    res.status(500).json({ error: 'Internal server error' });
+    serverError(res, error);
   }
 });
 
@@ -970,7 +873,7 @@ app.get('/me/saved_foods', authenticate, async (req, res) => {
     res.json({ success: true, items: rows });
   } catch (error) {
     console.error('Error in GET /me/saved_foods:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    serverError(res, error);
   }
 });
 
@@ -989,7 +892,7 @@ app.post('/me/saved_foods', authenticate, async (req, res) => {
     res.status(201).json({ success: true, id: result.id });
   } catch (error) {
     console.error('Error in POST /me/saved_foods:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    serverError(res, error);
   }
 });
 
@@ -1002,7 +905,7 @@ app.delete('/me/saved_foods/:id', authenticate, async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     console.error('Error in DELETE /me/saved_foods/:id', error);
-    res.status(500).json({ error: 'Internal server error' });
+    serverError(res, error);
   }
 });
 
@@ -1022,7 +925,7 @@ app.post('/me/activity', authenticate, async (req, res) => {
     res.status(201).json({ success: true, date, steps, calories_burned: estimatedCalories });
   } catch (error) {
     console.error('Error in POST /me/activity:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    serverError(res, error);
   }
 });
 
@@ -1034,12 +937,12 @@ app.get('/me/activity', authenticate, async (req, res) => {
     res.json({ success: true, date, activity: record });
   } catch (error) {
     console.error('Error in GET /me/activity:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    serverError(res, error);
   }
 });
 
-// Root endpoint
-app.get('/', (req, res) => {
+// API index. "/" itself belongs to the frontend, which the same Worker serves as static assets.
+app.get('/api', (req, res) => {
   res.json({ 
     message: 'Nutrition App API',
     endpoints: {
@@ -1053,10 +956,18 @@ app.get('/', (req, res) => {
       'PUT /me/profile': 'Update user profile (auth required)',
       'GET /me/targets': 'Get calculated daily targets BMR/TDEE/macros (auth required)',
       // Meal Planning
-      'POST /me/plan_meal': 'Get meal plan using stored profile (auth required)',
-      'POST /api/plan_meal': 'Get meal plan (legacy, no auth)',
-      // Recipe Analysis
-      'POST /me/analyze_recipe': 'Analyze recipe from URL (auth required)',
+      // AI provider key (bring your own: OpenRouter, OpenAI, Anthropic, Gemini, Groq, ...)
+      'GET /ai/providers': 'Providers a key can be for (public)',
+      'GET /me/api_key': 'Key status: has_key, last4, updated_at (auth required)',
+      'PUT /me/api_key': 'Save or replace your AI key; body { api_key, provider? } (auth required)',
+      'DELETE /me/api_key': 'Remove your AI key (auth required)',
+      // AI (auth + saved AI key required)
+      'POST /me/plan_meal': 'Get meal plan using stored profile',
+      'POST /me/analyze_recipe': 'Analyze recipe from URL',
+      'POST /me/search_recipe': 'Search the web for recipes',
+      'POST /me/intake/from_image': 'Estimate foods from a photo',
+      'POST /me/coach': 'Coach observations and suggestions',
+      'POST /me/coach_summary': 'Two-step coach summary',
   // Intake / Activity
   'POST /me/intake': 'Log a food item (auth required)',
   'GET /me/intake?date=YYYY-MM-DD': 'Get intake items and totals for a day (auth required)',
@@ -1097,33 +1008,43 @@ app.get('/me/summary', authenticate, async (req, res) => {
     res.json({ success: true, month, summary });
   } catch (error) {
     console.error('Error in GET /me/summary:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    serverError(res, error);
   }
 });
 
 // Helper: compute aggregated insights for last N days
-function computeInsightsForDays(userId, days = 7) {
-  const results = [];
+// The last `days` days, oldest first. Two range queries, then days with no rows are filled with zeros.
+async function computeInsightsForDays(userId, days = 7) {
+  days = Math.trunc(days); // ?days=7.5 would otherwise index past the array
   const today = new Date();
-  for (let i = 0; i < days; i++) {
+  const dates = Array.from({ length: days }, (_, i) => {
     const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    const dateStr = d.toISOString().slice(0,10);
-    const intake = getIntakeTotalsByDate(userId, dateStr) || { calories_total: 0, protein_total: 0, carbs_total: 0, fat_total: 0 };
-    const activity = getActivityByDate(userId, dateStr) || { steps: 0, calories_burned: 0 };
-    results.push({ date: dateStr, intake, activity, weekday: d.getDay() });
-  }
-  return results.sort((a,b) => a.date.localeCompare(b.date));
+    d.setDate(today.getDate() - (days - 1 - i));
+    return d;
+  });
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const [intakeRows, activityRows] = await Promise.all([
+    getIntakeTotalsRange(userId, iso(dates[0]), iso(dates[days - 1])),
+    getActivityRange(userId, iso(dates[0]), iso(dates[days - 1])),
+  ]);
+  const intakeBy = new Map(intakeRows.map((r) => [r.date, r]));
+  const activityBy = new Map(activityRows.map((r) => [r.date, r]));
+  return dates.map((d) => ({
+    date: iso(d),
+    intake: intakeBy.get(iso(d)) || { calories_total: 0, protein_total: 0, carbs_total: 0, fat_total: 0 },
+    activity: activityBy.get(iso(d)) || { steps: 0, calories_burned: 0 },
+    weekday: d.getDay(),
+  }));
 }
 
 // GET /me/insights?days=7 - basic averages and simple insights
-app.get('/me/insights', authenticate, (req, res) => {
+app.get('/me/insights', authenticate, async (req, res) => {
   try {
     const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
-    const profile = getProfile(req.userId) || {};
+    const profile = (await getProfile(req.userId)) || {};
     const targets = calculate_daily_targets(profile) || {};
 
-    const rows = computeInsightsForDays(req.userId, days);
+    const rows = await computeInsightsForDays(req.userId, days);
 
     let sumCalories = 0, sumProtein = 0, sumCarbs = 0, sumFat = 0, sumSteps = 0;
     let daysHitCalories = 0, proteinBelowWeekday = 0;
@@ -1170,18 +1091,18 @@ app.get('/me/insights', authenticate, (req, res) => {
     res.json({ success: true, days: count, averages, profile_targets: targets, insights, rows });
   } catch (error) {
     console.error('Error in GET /me/insights:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    serverError(res, error);
   }
 });
 
 // POST /me/coach - generate compact stats and ask LLM for observations + suggestions
-app.post('/me/coach', authenticate, async (req, res) => {
+app.post('/me/coach', authenticate, requireApiKey, async (req, res) => {
   try {
     const days = Math.min(90, Math.max(1, Number(req.body.days) || 7));
-    const profile = getProfile(req.userId) || {};
+    const profile = (await getProfile(req.userId)) || {};
     const targets = calculate_daily_targets(profile) || {};
 
-    const rows = computeInsightsForDays(req.userId, days);
+    const rows = await computeInsightsForDays(req.userId, days);
 
     // Build compact stats
     const stats = { days: rows.length, days_data: [] };
@@ -1199,7 +1120,7 @@ app.post('/me/coach', authenticate, async (req, res) => {
 
     prompt += `\nGive observations in plain, actionable language and suggestions that are specific and measurable (e.g., "add 20g protein at breakfast\").`;
 
-    const result = await callPerplexityAPI(prompt);
+    const result = await callPerplexityAPI(prompt, req.ai);
 
     // Try to parse JSON from model response
     let parsed = null;
@@ -1214,24 +1135,24 @@ app.post('/me/coach', authenticate, async (req, res) => {
       console.error('Failed to parse coach JSON:', e);
     }
 
-    // Store session data for debugging
-    updateSessionData(req.userId, JSON.stringify({ prompt, days }), JSON.stringify(result));
+    // Store session data for debugging. Awaited: a Worker may stop work left running after the response.
+    await updateSessionData(req.userId, JSON.stringify({ prompt, days }), JSON.stringify(result))
+      .catch((e) => console.error('session save failed', e.message));
 
     res.json({ success: true, raw: result.content, parsed });
   } catch (error) {
-    console.error('Error in POST /me/coach:', error);
-    res.status(500).json({ error: 'Internal server error', details: error.message });
+    sendAiError(res, error, 'POST /me/coach');
   }
 });
 
-// POST /me/coach_summary - 2-step OpenRouter reasoning flow
-app.post('/me/coach_summary', authenticate, async (req, res) => {
+// POST /me/coach_summary - 2-step draft-then-refine coach flow
+app.post('/me/coach_summary', authenticate, requireApiKey, async (req, res) => {
   try {
     const days = Math.min(90, Math.max(1, Number(req.body.days) || 7));
-    const profile = getProfile(req.userId) || {};
+    const profile = (await getProfile(req.userId)) || {};
     const targets = calculate_daily_targets(profile) || {};
 
-    const rows = computeInsightsForDays(req.userId, days);
+    const rows = await computeInsightsForDays(req.userId, days);
 
     // Build compact summary for the model
     let compact = `Profile targets: ${targets.calories || 'N/A'} kcal/day, ${targets.protein_g || 'N/A'} g protein. Goal: ${targets.goal || 'N/A'}.`;
@@ -1245,25 +1166,24 @@ app.post('/me/coach_summary', authenticate, async (req, res) => {
       { role: 'user', content: `You are an evidence-based nutrition coach. Here are compact stats:\n${compact}\nPlease provide concise observations and 3 specific suggestions.` }
     ];
 
-    const first = await callOpenRouter(messages1, { withReasoning: true });
+    const first = await chat(req.ai, messages1, { maxTokens: 800 });
 
     // Second call: feed back the first answer + ask it to think again
     const messages2 = [
       { role: 'user', content: compact },
-      { role: 'assistant', content: first.content, reasoning_details: first.reasoning_details || null },
+      { role: 'assistant', content: first.content },
       { role: 'user', content: 'Are you sure? Think carefully and refine your suggestions if needed.' }
     ];
 
-    const second = await callOpenRouter(messages2, { withReasoning: true });
+    const second = await chat(req.ai, messages2, { maxTokens: 800 });
 
-    // Store session data for debugging
-    updateSessionData(req.userId, JSON.stringify({ compact, days }), JSON.stringify({ first, second }));
+    // Store session data for debugging. Awaited: a Worker may stop work left running after the response.
+    await updateSessionData(req.userId, JSON.stringify({ compact, days }), JSON.stringify({ first, second }))
+      .catch((e) => console.error('session save failed', e.message));
 
     res.json({ success: true, coach_text: second.content });
   } catch (error) {
-    console.error('Error in POST /me/coach_summary:', error);
-    // Fallback: return a simple error message and hint
-    res.status(500).json({ error: 'Failed to generate coach summary', details: error.message });
+    sendAiError(res, error, 'POST /me/coach_summary', 'Failed to generate coach summary');
   }
 });
 
@@ -1274,42 +1194,16 @@ app.get('/health', (req, res) => {
 
 // Global error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ error: 'Internal Server Error', message: err.message });
+  // body-parser errors carry the raw request text on err.body (passwords, API keys): never log the object.
+  if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON body' });
+  if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: err.expose ? err.message : 'Bad request' });
+  console.error('Unhandled error:', err.stack || err.message);
+  res.status(500).json({ error: 'Internal Server Error' });
 });
 
-// Bind explicitly to all interfaces for hosting platforms like Railway.
-const HOST = process.env.HOST || '0.0.0.0';
-
-async function startServer() {
-  try {
-    await ensureDatabaseReady();
-    console.log('✅ Database connection verified');
-
-    app.listen(PORT, HOST, () => {
-      console.log(`Backend server running on http://${HOST}:${PORT}`);
-      console.log(`Health check: http://${HOST}:${PORT}/health`);
-
-      if (!process.env.OPENROUTER_API_KEY && !process.env.PERPLEXITY_API_KEY) {
-        console.warn('⚠️  WARNING: OPENROUTER_API_KEY not found in .env file');
-        console.warn('   Please create backend/.env with your OpenRouter API key');
-        console.warn('   Get your key at: https://openrouter.ai/keys');
-      } else {
-        console.log('✅ API key loaded (using OpenRouter)');
-      }
-    });
-  } catch (error) {
-    console.error('❌ Failed to start backend:', error.message);
-    if (error?.code === 'ENETUNREACH') {
-      console.error('   DATABASE_URL points to a host this deployment cannot reach.');
-      console.error('   If you are using Supabase on Railway, switch DATABASE_URL to the Supabase pooler URI instead of the direct database host.');
-    }
-    process.exit(1);
-  }
-}
-
-startServer();
-
-// Export the app for serverless deployment
-export default app;
+// The Workers runtime routes each request to this in-process server (no real socket is opened).
+// API paths reach it via assets.run_worker_first in wrangler.jsonc; everything else is the frontend.
+const PORT = 8080;
+app.listen(PORT);
+export default httpServerHandler({ port: PORT });
 

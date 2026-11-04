@@ -1,49 +1,34 @@
-# Database Setup Guide
+# Backend Setup Guide
+
+The backend is a Cloudflare Worker (`server.js`, Express 5) with a D1 database. Config is in `wrangler.jsonc`.
 
 ## Installation
-
-Install backend dependencies:
 
 ```bash
 cd backend
 npm install
 ```
 
-## Database Initialization
+## Database (D1)
 
-This backend uses PostgreSQL in production.
-
-1. Create a PostgreSQL database.
-2. Run `backend/schema_postgres.sql` against that database.
-3. Set `DATABASE_URL` in your environment.
-
-Example using `psql`:
+The schema lives in `migrations/` and is applied with Wrangler:
 
 ```bash
-psql "$DATABASE_URL" -f backend/schema_postgres.sql
+npx wrangler d1 migrations apply nutrition-db --local    # your machine (npm run dev does this for you)
+npx wrangler d1 migrations apply nutrition-db --remote   # the deployed database
 ```
 
-### Railway + Supabase
+To change the schema, add a new numbered file (`npx wrangler d1 migrations create nutrition-db <name>`); never edit an applied migration.
 
-If your backend is deployed on Railway and PostgreSQL is hosted on Supabase, do not use the direct database host if it resolves only to IPv6. Railway will fail with `ENETUNREACH` during connection attempts.
+Locally the database is a SQLite file under `.wrangler/`; delete that folder to start over.
 
-Use the Supabase pooler connection string in your Railway `DATABASE_URL` instead. In Supabase, copy the Transaction or Session pooler URI from the database connection settings and use that as `DATABASE_URL` for Railway.
+## Secrets
 
-The server now verifies that the database connection works and that the `users` and `user_profiles` tables exist before it starts listening.
+Local: `backend/.dev.vars` (copy `.dev.vars.example`). Production: `npx wrangler secret put API_KEY_ENCRYPTION_KEY`.
 
-## Environment Variables
+Generate `API_KEY_ENCRYPTION_KEY` with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`. It encrypts each user's own AI provider key; there is no shared AI key. See "Bring your own AI key" in the root README.
 
-Make sure your `.env` file includes:
-
-```env
-DATABASE_URL=postgresql://user:password@host:5432/database
-OPENROUTER_API_KEY=your-key-here
-PORT=3001
-SESSION_SECRET=your-session-secret-key-change-in-production
-```
-
-**Important**: Change `SESSION_SECRET` to a strong random string in production!
-**Important**: `DATABASE_URL` must point to a PostgreSQL database with the schema from `backend/schema_postgres.sql` applied.
+There is no session secret: sessions are random tokens stored (hashed) in the D1 `sessions` table, so logging out revokes them.
 
 ## API Endpoints
 
@@ -100,7 +85,6 @@ SESSION_SECRET=your-session-secret-key-change-in-production
   ```
   Optional overrides: `goal`, `targetCalories`, `allergies`, `dietType`, `preferences`, `request`
 
-- `POST /api/plan_meal` - Legacy endpoint (no auth, uses request body directly)
 
 ### Recipe Analysis
 - `POST /me/analyze_recipe` - Analyze recipe from URL (requires session/authentication)

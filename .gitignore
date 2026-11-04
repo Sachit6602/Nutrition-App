@@ -35,3 +35,12 @@ backend/.env
 # OS
 Thumbs.db
 
+
+# Cloudflare Workers local state and secrets
+.wrangler/
+.dev.vars
+backend/.dev.vars
+
+# Local browser-test artifacts
+.playwright-cli/
+frontend/.playwright-cli/

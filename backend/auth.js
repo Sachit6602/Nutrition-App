@@ -1,165 +1,120 @@
-import bcrypt from 'bcryptjs';
-import { getUserByEmail, createUser, getUserById } from './db.js';
+// Login sessions and the register/login/logout handlers. Password hashing lives in password.js.
+import { env } from 'cloudflare:workers';
+import { createSession, createUser, deleteSession, getSessionUser, getUserByEmail } from './db.js';
+import { b64u, hashPassword, verifyPassword } from './password.js';
 
-// Hash password
-export const hashPassword = async (password) => {
-  const saltRounds = 10;
-  return await new Promise((resolve, reject) => {
-    bcrypt.hash(password, saltRounds, (err, hash) => {
-      if (err) return reject(err);
-      resolve(hash);
-    });
-  });
+const MIN_PASSWORD = 8;
+
+// True when this key has used up its attempts (AUTH_LIMITER in wrangler.jsonc). Checked before any hashing,
+// so a flood of guesses costs no PBKDF2 CPU.
+const limited = async (key) => {
+  if (!env.AUTH_LIMITER) return false;
+  const { success } = await env.AUTH_LIMITER.limit({ key });
+  return !success;
+};
+const TOO_MANY = { error: 'Too many attempts. Wait a minute and try again.' };
+
+// ---------- Sessions: random token in an HttpOnly cookie, its SHA-256 in D1 ----------
+const COOKIE = 'sid';
+const TTL_SECONDS = 7 * 24 * 60 * 60;
+
+const sha256 = async (s) => b64u(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
+
+const readToken = (req) => {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k === COOKIE) return v.join('=');
+  }
+  return null;
 };
 
-// Verify password
-export const verifyPassword = async (password, hash) => {
-  if (!password || !hash) return false;
-  return await new Promise((resolve, reject) => {
-    bcrypt.compare(password, hash, (err, same) => {
-      if (err) return reject(err);
-      resolve(!!same);
-    });
-  });
+// Same-origin by default (the Worker serves the frontend too). Set COOKIE_SAMESITE=none only when the
+// frontend is hosted on a different site; that also forces Secure.
+const cookieAttrs = (req) => {
+  const host = String(req.headers.host || '');
+  const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  const sameSite = process.env.COOKIE_SAMESITE === 'none' ? 'None' : 'Lax';
+  return `Path=/; HttpOnly; SameSite=${sameSite}${local && sameSite !== 'None' ? '' : '; Secure'}`;
 };
 
-// Authentication middleware (uses session)
+const startSession = async (req, res, userId) => {
+  const token = b64u(crypto.getRandomValues(new Uint8Array(32)));
+  await createSession(await sha256(token), userId, TTL_SECONDS);
+  res.append('Set-Cookie', `${COOKIE}=${token}; Max-Age=${TTL_SECONDS}; ${cookieAttrs(req)}`);
+};
+
+// The signed-in user for this request, or null.
+export const currentUser = async (req) => {
+  const token = readToken(req);
+  return token ? getSessionUser(await sha256(token)) : null;
+};
+
 export const authenticate = async (req, res, next) => {
-  // Check if user is logged in via session
-  if (!req.session || !req.session.userId) {
-    return res.status(401).json({ error: 'Not authenticated. Please login first.' });
+  try {
+    const user = await currentUser(req);
+    if (!user) return res.status(401).json({ error: 'Not authenticated. Please login first.' });
+    req.userId = user.id;
+    req.user = user;
+    next();
+  } catch (err) {
+    next(err);
   }
-  
-  // Verify user still exists
-  const user = await getUserById(req.session.userId);
-  if (!user) {
-    // Clear invalid session
-    req.session.destroy();
-    return res.status(401).json({ error: 'User not found' });
-  }
-  
-  req.userId = req.session.userId;
-  req.user = user;
-  next();
 };
 
-// Register user
+const credentials = (req) => ({
+  email: typeof req.body?.email === 'string' ? req.body.email.trim() : '',
+  password: typeof req.body?.password === 'string' ? req.body.password : '',
+});
+
 export const register = async (req, res) => {
   try {
-    console.log('Registration request received:', { email: req.body?.email });
-    console.log('Request body keys:', Object.keys(req.body || {}));
-    
-    // Ensure we have a valid request body
-    if (!req.body) {
-      console.log('No request body received');
-      return res.status(400).json({ error: 'Request body is required' });
-    }
-    
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      console.log('Missing email or password');
-      return res.status(400).json({ error: 'Email and password are required' });
-    }
-    
-    // Check if user already exists
-    console.log('Checking if user exists...');
-    const existingUser = await getUserByEmail(email);
-    if (existingUser) {
-      console.log('User already exists:', email);
-      return res.status(400).json({ error: 'Email already registered' });
-    }
-    
-    // Hash password and create user
-    console.log('Hashing password...');
-    const passwordHash = await hashPassword(password);
-    console.log('Password hashed, creating user...');
-    const user = await createUser(email, passwordHash);
-    console.log('User created:', user.id);
-    
-    // Create session
-    if (!req.session) {
-      console.error('Session not available!');
-      return res.status(500).json({ error: 'Session not available' });
-    }
-    
-    req.session.userId = user.id;
-    req.session.email = user.email;
-    console.log('Session created for user:', user.id);
-    
-    console.log('Sending success response...');
-    const response = {
-      success: true,
-      user: {
-        id: user.id,
-        email: user.email
-      },
-      message: 'Registration successful'
-    };
-    
-    res.status(201).json(response);
-    console.log('Response sent successfully');
-  } catch (error) {
-    console.error('Registration error:', error);
-    console.error('Error stack:', error.stack);
-    
-    // Make sure we send a response even if there's an error
-    if (!res.headersSent) {
-      res.status(500).json({ 
-        error: 'Internal server error',
-        details: error.message 
-      });
-    }
-  }
-};
+    const { email, password } = credentials(req);
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    if (password.length < MIN_PASSWORD) return res.status(400).json({ error: `Use a password of at least ${MIN_PASSWORD} characters.` });
+    if (await limited(`register:${req.headers['cf-connecting-ip'] || 'local'}`)) return res.status(429).json(TOO_MANY);
+    if (await getUserByEmail(email)) return res.status(400).json({ error: 'Email already registered' });
 
-// Login user
-export const login = async (req, res) => {
-  try {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
+    let user;
+    try {
+      user = await createUser(email, await hashPassword(password));
+    } catch (err) {
+      // Two sign-ups with the same email at once: the UNIQUE constraint catches the second.
+      if (/UNIQUE constraint failed/i.test(String(err?.message))) return res.status(400).json({ error: 'Email already registered' });
+      throw err;
     }
-    
-    // Find user
-    const user = await getUserByEmail(email);
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    
-    // Verify password
-    const isValid = await verifyPassword(password, user.password_hash);
-    if (!isValid) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-    
-    // Create session
-    req.session.userId = user.id;
-    req.session.email = user.email;
-    
-    res.json({
-      success: true,
-      user: {
-        id: user.id,
-        email: user.email
-      },
-      message: 'Login successful'
-    });
+    await startSession(req, res, user.id);
+    res.status(201).json({ success: true, user: { id: user.id, email: user.email }, message: 'Registration successful' });
   } catch (error) {
-    console.error('Login error:', error);
+    console.error('Registration error:', error?.message);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-// Logout user
-export const logout = (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      console.error('Logout error:', err);
-      return res.status(500).json({ error: 'Failed to logout' });
+export const login = async (req, res) => {
+  try {
+    const { email, password } = credentials(req);
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    if (await limited(`login:${email.toLowerCase()}`)) return res.status(429).json(TOO_MANY);
+    const user = await getUserByEmail(email);
+    if (!user || !(await verifyPassword(password, user.password_hash))) {
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
-    res.clearCookie('connect.sid'); // Clear session cookie
+    await startSession(req, res, user.id);
+    res.json({ success: true, user: { id: user.id, email: user.email }, message: 'Login successful' });
+  } catch (error) {
+    console.error('Login error:', error?.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+export const logout = async (req, res) => {
+  try {
+    const token = readToken(req);
+    if (token) await deleteSession(await sha256(token));
+    res.append('Set-Cookie', `${COOKIE}=; Max-Age=0; ${cookieAttrs(req)}`);
     res.json({ success: true, message: 'Logout successful' });
-  });
+  } catch (error) {
+    console.error('Logout error:', error?.message);
+    res.status(500).json({ error: 'Failed to logout' });
+  }
 };

@@ -1,5 +1,11 @@
-// Duplicate App component removed. Only one App function remains, with all hooks, handlers, and JSX inside.
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react';
+import {
+  ArrowClockwiseIcon, ArrowSquareOutIcon, BookmarkSimpleIcon, CalendarBlankIcon, CameraIcon, CaretDownIcon, CaretLeftIcon,
+  CaretRightIcon, CheckCircleIcon, CheckIcon, ChefHatIcon, EqualsIcon, EyeIcon, EyeSlashIcon, FireIcon, FootprintsIcon, ForkKnifeIcon,
+  HouseIcon, KeyIcon, LeafIcon, PencilSimpleIcon, PlusIcon, ShieldCheckIcon, SignOutIcon, SlidersHorizontalIcon, SparkleIcon, TrashIcon,
+  TrendDownIcon, TrendUpIcon, WarningCircleIcon,
+} from '@phosphor-icons/react';
+import { CalorieChart, MACROS, MacroMeter, RecipeCard, Ring, Sheet, Toast, fmt, parseDay } from './ui.jsx';
 
 // In development, always use the Vite proxy to reach the local backend.
 // In production, set VITE_API_BASE_URL to your deployed backend origin.
@@ -9,15 +15,136 @@ const normalizedApiBase = rawApiBase
   : '';
 const API_BASE = normalizedApiBase.replace(/\/$/, '');
 
+// One place for fetch + JSON parsing + server error messages.
+async function api(path, { method = 'GET', body } = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    credentials: 'include',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    throw new Error(`Unexpected response from server (status ${res.status})`);
+  }
+  if (!res.ok) throw Object.assign(new Error(data.error || `Request failed (status ${res.status})`), { status: res.status, code: data.code });
+  return data;
+}
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const shiftMonth = (ym, delta) => {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y, m - 1 + delta, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+const monthLabel = (ym) => parseDay(`${ym}-01`).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+const longDay = (iso) => parseDay(iso).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+const optNum = (v) => (v !== '' && v != null ? Number(v) : undefined);
+
+const EMPTY_MANUAL = { name: '', calories: '', protein: '', carbs: '', fat: '' };
+const EMPTY_SAVED = { name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', default_servings: 1 };
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const GOALS = [
+  { value: 'lose', label: 'Lose weight', icon: TrendDownIcon },
+  { value: 'maintain', label: 'Maintain', icon: EqualsIcon },
+  { value: 'gain', label: 'Gain weight', icon: TrendUpIcon },
+];
+const ACTIVITY = [
+  { value: 'low', label: 'Low', hint: 'Mostly sitting' },
+  { value: 'medium', label: 'Medium', hint: 'On your feet some' },
+  { value: 'high', label: 'High', hint: 'Very active' },
+];
+const IDEAS = ['High-protein dinner under 600 kcal', 'Vegetarian meal prep for 3 days', 'Quick breakfast, no cooking'];
+
+// Codes the backend uses when the user's own AI key is missing, rejected, out of credits or can't do the task.
+const KEY_CODES = ['API_KEY_REQUIRED', 'API_KEY_INVALID', 'API_KEY_NO_CREDITS', 'API_KEY_NO_VISION'];
+
+// Matches a pasted key to a provider by prefix (list comes from GET /ai/providers). null = ambiguous, user picks.
+const detectProvider = (providers, key) =>
+  providers.find((p) => p.prefix && new RegExp(p.prefix).test(key.trim())) || null;
+
+// Signed-out marketing page; its JS and CSS load as their own chunk only when needed.
+// The import starts at module load so it runs alongside /auth/status instead of after it.
+// A failed chunk load (flaky network, stale tab after a redeploy) reloads once, then falls back to the sign-in screen.
+const landingChunk = import('./Landing.jsx').then((m) => {
+  try { sessionStorage.removeItem('landing-reload'); } catch {}
+  return m;
+}, () => {
+  try {
+    if (!sessionStorage.getItem('landing-reload')) {
+      sessionStorage.setItem('landing-reload', '1');
+      window.location.reload();
+    }
+  } catch {}
+  return { default: function LandingFallback({ onSignIn }) { useEffect(() => { onSignIn(); }, []); return null; } };
+});
+const Landing = lazy(() => landingChunk);
+
+const Ambient = () => (
+  <div className="ambient" aria-hidden="true"><span /><span /><span /></div>
+);
+
+const Splash = () => (
+  <div className="grid min-h-[100dvh] place-items-center">
+    <Ambient />
+    <LeafIcon size={40} weight="duotone" className="animate-pulse text-accent" aria-label="Loading" />
+  </div>
+);
+
+const Brand = ({ compact = false }) => (
+  <div className="flex items-center gap-2.5">
+    <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-accent text-accent-ink">
+      <LeafIcon size={20} weight="fill" aria-hidden="true" />
+    </span>
+    <span className={`font-semibold tracking-tight ${compact ? 'hidden sm:inline' : 'text-lg'}`}>Healthy Diet Tracker</span>
+  </div>
+);
+
+const Stat = ({ icon: Icon, label, value }) => (
+  <div>
+    <div className="flex items-center gap-1.5 text-xs text-ink-2 sm:text-sm"><Icon size={16} aria-hidden="true" />{label}</div>
+    <div className="num mt-1 text-xl font-semibold tracking-tight sm:text-2xl">
+      {value}<span className="ml-1 text-sm font-normal text-ink-2">kcal</span>
+    </div>
+  </div>
+);
+
+const Segmented = ({ options, value, onChange, label }) => (
+  <div className="flex rounded-full bg-surface-2 p-1" role="group" aria-label={label}>
+    {options.map(([v, text]) => (
+      <button
+        key={v}
+        type="button"
+        aria-pressed={value === v}
+        onClick={() => onChange(v)}
+        className={`h-9 rounded-full px-4 text-sm font-medium transition ${value === v ? 'bg-surface text-ink shadow-sm' : 'text-ink-2 hover:text-ink'}`}
+      >
+        {text}
+      </button>
+    ))}
+  </div>
+);
+
+const RecipeSkeleton = () => (
+  <div className="panel animate-pulse space-y-4 p-6" aria-hidden="true">
+    <div className="skeleton aspect-[16/9]" />
+    <div className="skeleton h-6 w-2/3" />
+    <div className="skeleton h-4 w-1/2" />
+    <div className="skeleton h-2 w-full rounded-full" />
+  </div>
+);
+
 function App() {
-  // Auth 
+  // Auth
+  const [authChecked, setAuthChecked] = useState(false);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [user, setUser] = useState(null);
   const [showLogin, setShowLogin] = useState(true);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState(null);
-
-  // Form 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -27,54 +154,70 @@ function App() {
   const [profileLoading, setProfileLoading] = useState(false);
   const [showProfileForm, setShowProfileForm] = useState(false);
   const [profileRequired, setProfileRequired] = useState(false);
+  // Set when /me/profile failed for a reason other than "no profile yet": the app stays usable, onboarding is not forced.
+  const [profileError, setProfileError] = useState(false);
+
+  // AI provider key (bring your own). keyStep: null = not needed at login, 'active' = showing, 'done' = saved or skipped.
+  const [keyStatus, setKeyStatus] = useState(null);
+  const [providers, setProviders] = useState([]);
+  const [keyProvider, setKeyProvider] = useState('auto');
+  const [keyStep, setKeyStep] = useState(null);
+  const [keyInput, setKeyInput] = useState('');
+  const [keyShow, setKeyShow] = useState(false);
+  const [keyError, setKeyError] = useState(null);
+  const [keySaving, setKeySaving] = useState(false);
+  const [keyReplacing, setKeyReplacing] = useState(false);
+  const [keyFocus, setKeyFocus] = useState(false);
+  const keyInputRef = useRef(null);
 
   // Daily targets (BMR/TDEE/macros)
   const [targets, setTargets] = useState(null);
   const [targetsLoading, setTargetsLoading] = useState(false);
 
-  // Today / logging
+  // Today
   const [todayTotals, setTodayTotals] = useState(null);
   const [todayActivity, setTodayActivity] = useState(null);
   const [frequentItems, setFrequentItems] = useState([]);
-  const [lastLogUpdate, setLastLogUpdate] = useState(0);
+  const [steps, setSteps] = useState('');
+  const [stepsSaving, setStepsSaving] = useState(false);
+
   // Insights & AI coach
   const [insights, setInsights] = useState(null);
+  const [insightDays, setInsightDays] = useState(7);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [coachResult, setCoachResult] = useState(null);
   const [coachLoading, setCoachLoading] = useState(false);
-  // Manual logging form state
-  const [manualName, setManualName] = useState('');
-  const [manualCalories, setManualCalories] = useState('');
-  const [manualProtein, setManualProtein] = useState('');
-  const [manualCarbs, setManualCarbs] = useState('');
-  const [manualFat, setManualFat] = useState('');
-  const [manualServings, setManualServings] = useState(1);
+
+  // Manual logging form (shared by Today and History, which never render together)
+  const [manual, setManual] = useState(EMPTY_MANUAL);
   const [manualLoading, setManualLoading] = useState(false);
   const [manualError, setManualError] = useState(null);
 
-  // --- Photo to Recipe (AI) ---
+  // Photo analysis
   const [photoModalVisible, setPhotoModalVisible] = useState(false);
   const [photoCandidates, setPhotoCandidates] = useState([]);
-  const [recipeResults, setRecipeResults] = useState([]);
-  const [recipeLoading, setRecipeLoading] = useState(false);
   const [photoUploading, setPhotoUploading] = useState(false);
   const [photoPreviewUrl, setPhotoPreviewUrl] = useState(null);
-  const [selectedCandidate, setSelectedCandidate] = useState(null);
+  const [recipeResults, setRecipeResults] = useState([]);
+  const [recipeLoading, setRecipeLoading] = useState(false);
   const imageInputRef = useRef(null);
+  // Numbers from the landing-page calculator. They fill empty profile fields until the first save.
+  const prefillRef = useRef(null);
 
   // Meal planning
+  const [userRequest, setUserRequest] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [response, setResponse] = useState(null);
+  const [error, setError] = useState(null);
+  const resultsRef = useRef(null);
+
+  // Profile form fields
   const [goals, setGoals] = useState('maintain');
   const [targetCalories, setTargetCalories] = useState('');
   const [allergies, setAllergies] = useState('');
   const [cuisine, setCuisine] = useState('');
   const [cookingTime, setCookingTime] = useState('');
   const [mealType, setMealType] = useState('');
-  const [userRequest, setUserRequest] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [response, setResponse] = useState(null);
-  const [error, setError] = useState(null);
-
-  // Profile form fields for calculator
   const [age, setAge] = useState('');
   const [sex, setSex] = useState('');
   const [heightCm, setHeightCm] = useState('');
@@ -82,388 +225,97 @@ function App() {
   const [activityLevel, setActivityLevel] = useState('medium');
   const [intensityPercent, setIntensityPercent] = useState(0);
 
-  // Check auth status on mount
+  // History
+  const [calendarMonth, setCalendarMonth] = useState(() => new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [calendarTotals, setCalendarTotals] = useState([]);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [selectedDayItems, setSelectedDayItems] = useState([]);
+  const [savedFoods, setSavedFoods] = useState([]);
+  const [savedLoading, setSavedLoading] = useState(false);
+  const [newSaved, setNewSaved] = useState(EMPTY_SAVED);
+  const [editingId, setEditingId] = useState(null);
+  const [editFields, setEditFields] = useState({ item_name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', servings: 1 });
+
+  // Toast
+  const [toast, setToast] = useState(null);
+  const notify = useCallback((message, tone = 'ok') => setToast({ message, tone, id: Date.now() }), []);
   useEffect(() => {
-    checkAuthStatus();
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3600);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // Simple client-side routing (home or /calendar)
+  const [route, setRoute] = useState(window.location.pathname || '/');
+  useEffect(() => {
+    const onPop = () => setRoute(window.location.pathname || '/');
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
   }, []);
-
-  // Load profile when authenticated
-  useEffect(() => {
-    if (isAuthenticated) {
-      loadProfile();
-    }
-  }, [isAuthenticated]);
-
-  // Load insights when authenticated
-  useEffect(() => {
-    if (isAuthenticated && !profileRequired) loadInsights(7);
-  }, [isAuthenticated, profileRequired]);
-
-  const loadInsights = async (days = 7) => {
-    if (!isAuthenticated) return;
-    setInsightsLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/me/insights?days=${days}`, { credentials: 'include' });
-      const text = await res.text();
-      if (!text) return;
-      const data = JSON.parse(text);
-      if (res.ok) setInsights(data);
-    } catch (err) {
-      console.error('Failed to load insights:', err);
-    } finally {
-      setInsightsLoading(false);
-    }
+  const navigate = (path) => {
+    if (path !== window.location.pathname) window.history.pushState({}, '', path);
+    setRoute(path);
+    window.scrollTo(0, 0);
   };
+  const onCalendar = route.startsWith('/calendar');
 
-  const searchRecipes = async (query) => {
-    if (!query) return;
-    setRecipeLoading(true);
-    setRecipeResults([]);
+  // ---------- Loaders ----------
+  const checkAuthStatus = async () => {
     try {
-      const res = await fetch(`${API_BASE}/me/search_recipe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }) });
-      const text = await res.text();
-      console.debug('searchRecipes response', { status: res.status, headers: res.headers, bodySnippet: String(text).slice(0,500) });
-      const ct = (res.headers.get('content-type') || '').toLowerCase();
-      if (!text) throw new Error('Empty response');
-      if (ct.includes('application/json')) {
-        const data = JSON.parse(text);
-        if (!res.ok) throw new Error(data.error || `Search failed (status ${res.status})`);
-        // Map search results to RecipeCard shape
-        const mapped = (data.recipes || []).map(r => ({
-          title: r.title || r.name || 'Recipe',
-          source_url: r.url || r.source_url || null,
-          image_url: r.image || null,
-          daily_contribution: r.summary || null,
-          steps: r.summary ? [r.summary] : undefined,
-          source: r.source || undefined,
-        }));
-        setRecipeResults(mapped);
-      } else {
-        // Non-JSON response (likely HTML). Surface raw body for debugging.
-        throw new Error(`Non-JSON response (status ${res.status}): ${String(text).slice(0,1000)}`);
+      const data = await api('/auth/status');
+      if (data.authenticated) {
+        setIsAuthenticated(true);
+        setUser(data.user);
       }
     } catch (err) {
-      console.error('Recipe search failed:', err);
-      // Show a more helpful alert including first part of server response
-      alert('Recipe search failed: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('Auth check failed:', err);
     } finally {
-      setRecipeLoading(false);
+      setAuthChecked(true);
     }
   };
-
-  const askCoach = async (days = 7) => {
-    if (!isAuthenticated) return;
-    setCoachLoading(true);
-    setCoachResult(null);
-    try {
-      const res = await fetch(`${API_BASE}/me/coach`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({ days }) });
-      const text = await res.text();
-      if (!text) throw new Error('Empty response');
-      const data = JSON.parse(text);
-      setCoachResult(data);
-    } catch (err) {
-      console.error('Coach request failed:', err);
-      setCoachResult({ error: err instanceof Error ? err.message : String(err) });
-    } finally {
-      setCoachLoading(false);
-    }
-  };
-
-  // Populate form from profile
-  useEffect(() => {
-    if (profile) {
-      setGoals(profile.goal || 'maintain');
-      setTargetCalories(profile.target_calories ?? '');
-      setAllergies(Array.isArray(profile.allergies) ? profile.allergies.join(', ') : '');
-      setCuisine(profile.preferences?.cuisine || '');
-      setCookingTime(profile.preferences?.cookingTime || '');
-      setMealType(profile.preferences?.mealType || '');
-      setAge(profile.age ?? '');
-      setSex(profile.sex || '');
-      setHeightCm(profile.height_cm ?? '');
-      setWeightKg(profile.weight_kg ?? '');
-      setActivityLevel(profile.activity_level || 'medium');
-      setIntensityPercent(profile.intensity_percent ?? 0);
-    }
-  }, [profile]);
 
   const loadProfile = async () => {
     setProfileLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/me/profile`, {
-        credentials: 'include',
-      });
-      if (res.ok) {
-        const text = await res.text();
-        if (text) {
-          const data = JSON.parse(text);
-          const loadedProfile = data.profile;
-          setProfile(loadedProfile);
-
-          // Check if profile is empty/incomplete (new user)
-          const isProfileEmpty = !loadedProfile ||
-            (!loadedProfile.goal && !loadedProfile.target_calories &&
-             (!loadedProfile.allergies || loadedProfile.allergies.length === 0));
-
-          if (isProfileEmpty) {
-            setProfileRequired(true);
-            setShowProfileForm(true);
-          } else {
-            setProfileRequired(false);
-          }
-        }
-      } else if (res.status === 404) {
-        setProfileRequired(true);
-        setShowProfileForm(true);
-      }
+      const data = await api('/me/profile');
+      const loaded = data.profile;
+      setProfile(loaded);
+      setProfileError(false);
+      const isEmpty = !loaded || (!loaded.goal && !loaded.target_calories && (!loaded.allergies || loaded.allergies.length === 0));
+      setProfileRequired(isEmpty);
+      if (isEmpty) setShowProfileForm(true);
     } catch (err) {
       console.error('Failed to load profile:', err);
-      setProfileRequired(true);
-      setShowProfileForm(true);
+      if (err.status === 404) {
+        setProfileRequired(true);
+        setShowProfileForm(true);
+      } else {
+        setProfileError(true);
+      }
     } finally {
       setProfileLoading(false);
     }
   };
 
-  // Add manual item to a specific date (used by calendar popup)
-  const addManualToDate = async (date) => {
-    if (!date) return alert('No date selected');
-    setManualError(null);
-    setManualLoading(true);
+  const loadKeyStatus = async () => {
+    let status = { has_key: false, last4: null, updated_at: null };
     try {
-      const body = {
-        date: date,
-        item_name: manualName,
-        calories: Number(manualCalories),
-        protein_g: manualProtein ? Number(manualProtein) : undefined,
-        carbs_g: manualCarbs ? Number(manualCarbs) : undefined,
-        fat_g: manualFat ? Number(manualFat) : undefined,
-        servings: manualServings || 1,
-        source_type: 'manual'
-      };
-
-      const res = await fetch(`${API_BASE}/me/intake`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(body),
-      });
-
-      const text = await res.text();
-      if (!text) throw new Error('Empty response');
-      const data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Failed to add item');
-
-      // refresh selected day and notify
-      await selectDay(date);
-      window.dispatchEvent(new Event('logUpdated'));
-      // clear form
-      setManualName(''); setManualCalories(''); setManualProtein(''); setManualCarbs(''); setManualFat(''); setManualServings(1);
+      const [s, list] = await Promise.all([api('/me/api_key'), api('/ai/providers').catch(() => ({ providers: [] }))]);
+      status = s;
+      setProviders(list.providers || []);
     } catch (err) {
-      setManualError(err instanceof Error ? err.message : 'Failed to add');
-    } finally {
-      setManualLoading(false);
+      console.error('Failed to load key status:', err);
     }
-  };
-
-  // Manual add food handler
-  const handleManualAdd = async (e) => {
-    e?.preventDefault();
-    setManualError(null);
-    setManualLoading(true);
-    try {
-      const body = {
-        date: new Date().toISOString().slice(0,10),
-        item_name: manualName,
-        calories: Number(manualCalories),
-        protein_g: manualProtein ? Number(manualProtein) : undefined,
-        carbs_g: manualCarbs ? Number(manualCarbs) : undefined,
-        fat_g: manualFat ? Number(manualFat) : undefined,
-        servings: manualServings || 1,
-        source_type: 'manual'
-      };
-
-      const res = await fetch(`${API_BASE}/me/intake`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(body),
-      });
-
-      const text = await res.text();
-      if (!text) throw new Error('Empty response');
-      const data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Failed to add item');
-
-      // notify
-      window.dispatchEvent(new Event('logUpdated'));
-      // clear form
-      setManualName(''); setManualCalories(''); setManualProtein(''); setManualCarbs(''); setManualFat(''); setManualServings(1);
-    } catch (err) {
-      setManualError(err instanceof Error ? err.message : 'Failed to add');
-    } finally {
-      setManualLoading(false);
-    }
-  };
-
-  // --- Photo logging helpers ---
-  const openPhotoFileDialog = () => {
-    if (imageInputRef.current) imageInputRef.current.click();
-  };
-
-  const handlePhotoFileChange = async (e) => {
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    try {
-      const resizedBase64 = await fileToResizedBase64(file, 1024, 0.78);
-      const dataUrl = `data:image/jpeg;base64,${resizedBase64}`;
-      setPhotoPreviewUrl(dataUrl);
-      await submitImageForAnalysis(resizedBase64);
-    } catch (err) {
-      console.error('Failed to process image:', err);
-      alert('Failed to process image for upload.');
-    }
-  };
-
-  // Resize image file to JPEG base64 to reduce upload size and normalize inputs
-  const fileToResizedBase64 = (file, maxWidth = 1024, quality = 0.8) => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onerror = (e) => reject(e);
-      reader.onload = () => {
-        const img = new Image();
-        img.onerror = (e) => reject(e);
-        img.onload = () => {
-          const scale = Math.min(1, maxWidth / img.width);
-          const w = Math.round(img.width * scale);
-          const h = Math.round(img.height * scale);
-          const canvas = document.createElement('canvas');
-          canvas.width = w;
-          canvas.height = h;
-          const ctx = canvas.getContext('2d');
-          ctx.drawImage(img, 0, 0, w, h);
-          try {
-            const dataUrl = canvas.toDataURL('image/jpeg', quality);
-            const base64 = String(dataUrl).replace(/^data:image\/(png|jpeg);base64,/, '');
-            resolve(base64);
-          } catch (err) {
-            reject(err);
-          }
-        };
-        img.src = String(reader.result);
-      };
-      reader.readAsDataURL(file);
-    });
-  };
-
-  const submitImageForAnalysis = async (image_base64) => {
-    if (!image_base64) return;
-    setPhotoUploading(true);
-    setPhotoCandidates([]);
-    try {
-      const body = { date: new Date().toISOString().slice(0,10), image_base64 };
-      const res = await fetch(`${API_BASE}/me/intake/from_image`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
-      });
-      const text = await res.text();
-      const ct = res.headers.get('content-type') || '';
-      let data = null;
-      if (ct.includes('application/json')) {
-        try {
-          data = JSON.parse(text || '{}');
-        } catch (e) {
-          throw new Error('Invalid JSON response: ' + String(text).slice(0,500));
-        }
-      } else {
-        // Non-JSON response (likely HTML) — include a snippet for debugging
-        throw new Error(`Unexpected response content-type=${ct} status=${res.status}: ${String(text).slice(0,500)}`);
-      }
-      if (!res.ok) throw new Error(data.error || `Failed to analyze image (status ${res.status})`);
-      setPhotoCandidates(data.candidates || []);
-      setPhotoModalVisible(true);
-    } catch (err) {
-      console.error('Image analysis error:', err);
-      alert('Image analysis failed: ' + (err && err.message ? err.message : String(err)));
-    } finally {
-      setPhotoUploading(false);
-    }
-  };
-
-  const saveCandidateToDate = async (candidate, date) => {
-    try {
-      const body = {
-        date: date || new Date().toISOString().slice(0,10),
-        item_name: candidate.label,
-        calories: Number(candidate.calories || 0),
-        protein_g: candidate.protein_g != null ? Number(candidate.protein_g) : undefined,
-        carbs_g: candidate.carbs_g != null ? Number(candidate.carbs_g) : undefined,
-        fat_g: candidate.fat_g != null ? Number(candidate.fat_g) : undefined,
-        servings: 1,
-        source_type: 'generated_recipe',
-        image_url: photoPreviewUrl || null
-      };
-
-      const res = await fetch(`${API_BASE}/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
-      const txt = await res.text();
-      const ct = res.headers.get('content-type') || '';
-      let data = null;
-      if (ct.includes('application/json')) {
-        try {
-          data = JSON.parse(txt || '{}');
-        } catch (e) {
-          throw new Error('Invalid JSON response: ' + String(txt).slice(0,500));
-        }
-      } else {
-        throw new Error(`Unexpected response content-type=${ct} status=${res.status}: ${String(txt).slice(0,500)}`);
-      }
-      if (!res.ok) throw new Error(data.error || `Failed to add (status ${res.status})`);
-      setPhotoModalVisible(false);
-      setPhotoCandidates([]);
-      setPhotoPreviewUrl(null);
-      window.dispatchEvent(new Event('logUpdated'));
-    } catch (err) {
-      console.error('Save candidate error:', err);
-      alert('Save failed: ' + (err && err.message ? err.message : String(err)));
-    }
-  };
-
-  const handleQuickAdd = async (item) => {
-    try {
-      const body = {
-        date: new Date().toISOString().slice(0,10),
-        item_name: item.item_name || item.itemName || item.item_name,
-        calories: item.avg_calories || item.calories || 0,
-        protein_g: item.avg_protein || 0,
-        carbs_g: item.avg_carbs || 0,
-        fat_g: item.avg_fat || 0,
-        servings: 1,
-        source_type: item.source_type || 'saved_food'
-      };
-      const res = await fetch(`${API_BASE}/me/intake`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body)
-      });
-      const text = await res.text();
-      if (!text) throw new Error('Empty response');
-      const data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Failed to add item');
-      window.dispatchEvent(new Event('logUpdated'));
-    } catch (err) {
-      console.error('Quick add failed:', err);
-      alert('Failed to add item: ' + (err instanceof Error ? err.message : 'unknown'));
-    }
+    setKeyStatus(status);
+    setKeyStep(status.has_key ? null : 'active');
   };
 
   const loadTargets = useCallback(async () => {
     setTargetsLoading(true);
     setTargets(null);
     try {
-      const res = await fetch(`${API_BASE}/me/targets`, { credentials: 'include' });
-      const text = await res.text();
-      if (!text) return;
-      const data = JSON.parse(text);
-      if (res.ok && data.targets) {
-        setTargets(data.targets);
-      }
+      const data = await api('/me/targets');
+      if (data.targets) setTargets(data.targets);
     } catch (err) {
       console.error('Failed to load targets:', err);
     } finally {
@@ -471,49 +323,36 @@ function App() {
     }
   }, []);
 
-
-  // Load daily targets when authenticated and profile complete
-  useEffect(() => {
-    if (isAuthenticated && !profileRequired) {
-      loadTargets();
-    } else {
-      setTargets(null);
+  const loadInsights = async (days = 7) => {
+    if (!isAuthenticated) return;
+    setInsightDays(days);
+    setInsightsLoading(true);
+    try {
+      setInsights(await api(`/me/insights?days=${days}`));
+    } catch (err) {
+      console.error('Failed to load insights:', err);
+    } finally {
+      setInsightsLoading(false);
     }
-  }, [isAuthenticated, profileRequired, profile, loadTargets]);
-
-  // History / calendar UI state
-  const [calendarMonth, setCalendarMonth] = useState(() => new Date().toISOString().slice(0,7)); // YYYY-MM
-  const [calendarTotals, setCalendarTotals] = useState([]);
-  const [selectedDate, setSelectedDate] = useState(null);
-  const [selectedDayItems, setSelectedDayItems] = useState([]);
-  const [showCalendarPopup, setShowCalendarPopup] = useState(false);
-  const [savedFoods, setSavedFoods] = useState([]);
-  const [savedLoading, setSavedLoading] = useState(false);
-  const popupRef = useRef(null);
-  const [manualPopupName, setManualPopupName] = useState('');
-  const [manualPopupCalories, setManualPopupCalories] = useState('');
-  // Simple client-side routing (home or /calendar)
-  const [route, setRoute] = useState(window.location.pathname || '/');
-
-  useEffect(() => {
-    const onPop = () => setRoute(window.location.pathname || '/');
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-  }, []);
-
-  const navigate = (path) => {
-    if (path !== window.location.pathname) window.history.pushState({}, '', path);
-    setRoute(path);
   };
+
+  const loadTodayData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    const d = todayISO();
+    const [intake, activity, frequent] = await Promise.allSettled([
+      api(`/me/intake?date=${d}`),
+      api(`/me/activity?date=${d}`),
+      api('/me/intake/frequent'),
+    ]);
+    if (intake.status === 'fulfilled') setTodayTotals(intake.value.totals || null);
+    if (activity.status === 'fulfilled') setTodayActivity(activity.value.activity || null);
+    if (frequent.status === 'fulfilled') setFrequentItems(frequent.value.items || []);
+  }, [isAuthenticated]);
 
   const loadCalendar = async (month) => {
     if (!isAuthenticated) return;
     try {
-      const res = await fetch(`${API_BASE}/me/intake/calendar?month=${month}`, { credentials: 'include' });
-      if (!res.ok) return;
-      const text = await res.text();
-      if (!text) return;
-      const data = JSON.parse(text);
+      const data = await api(`/me/intake/calendar?month=${month}`);
       setCalendarTotals(data.totals || []);
     } catch (err) {
       console.error('Failed to load calendar totals:', err);
@@ -524,11 +363,7 @@ function App() {
     if (!isAuthenticated) return;
     setSavedLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/me/saved_foods`, { credentials: 'include' });
-      if (!res.ok) return;
-      const text = await res.text();
-      if (!text) return;
-      const data = JSON.parse(text);
+      const data = await api('/me/saved_foods');
       setSavedFoods(data.items || []);
     } catch (err) {
       console.error('Failed to load saved foods:', err);
@@ -537,196 +372,95 @@ function App() {
     }
   };
 
-  const openHistory = async () => {
-    // keep for compatibility — navigate to calendar route
-    navigate('/calendar');
-  };
-
-  const closeHistory = () => {
-    navigate('/');
-    setSelectedDate(null);
-    setSelectedDayItems([]);
-  };
-
   const selectDay = async (date) => {
     setSelectedDate(date);
+    setEditingId(null);
     try {
-      const res = await fetch(`${API_BASE}/me/intake?date=${date}`, { credentials: 'include' });
-      if (!res.ok) return;
-      const text = await res.text();
-      if (!text) return;
-      const data = JSON.parse(text);
+      const data = await api(`/me/intake?date=${date}`);
       setSelectedDayItems(data.items || []);
     } catch (err) {
       console.error('Failed to load day items:', err);
     }
   };
 
-  // Edit/delete item flows
-  const [editingId, setEditingId] = useState(null);
-  const [editFields, setEditFields] = useState({ item_name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', servings: 1 });
-
-  const startEdit = (item) => {
-    setEditingId(item.id);
-    setEditFields({
-      item_name: item.item_name || '',
-      calories: item.calories || '',
-      protein_g: item.protein_g || '',
-      carbs_g: item.carbs_g || '',
-      fat_g: item.fat_g || '',
-      servings: item.servings || 1,
-    });
-  };
-
-  const saveEdit = async (id) => {
-    try {
-      const res = await fetch(`${API_BASE}/me/intake/${id}`, {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' }, credentials: 'include',
-        body: JSON.stringify({
-          item_name: editFields.item_name,
-          calories: Number(editFields.calories),
-          protein_g: editFields.protein_g !== '' ? Number(editFields.protein_g) : null,
-          carbs_g: editFields.carbs_g !== '' ? Number(editFields.carbs_g) : null,
-          fat_g: editFields.fat_g !== '' ? Number(editFields.fat_g) : null,
-          servings: editFields.servings !== '' ? Number(editFields.servings) : 1,
-        })
-      });
-      const text = await res.text();
-      if (!text) throw new Error('Empty response');
-      const data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Failed to update');
-      // refresh day
-      await selectDay(selectedDate);
-      window.dispatchEvent(new Event('logUpdated'));
-      setEditingId(null);
-    } catch (err) {
-      alert('Failed to save: ' + (err instanceof Error ? err.message : 'unknown'));
+  // After any log change: refresh today, the chart, and (on History) the month + selected day.
+  const refreshLogs = async (date) => {
+    loadTodayData();
+    loadInsights(insightDays);
+    if (onCalendar) {
+      loadCalendar(calendarMonth);
+      if (date) await selectDay(date);
     }
   };
 
-  const removeItem = async (id) => {
-    if (!confirm('Delete this entry?')) return;
-    try {
-      const res = await fetch(`${API_BASE}/me/intake/${id}`, { method: 'DELETE', credentials: 'include' });
-      const text = await res.text();
-      if (!text) throw new Error('Empty response');
-      const data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Failed to delete');
-      await selectDay(selectedDate);
-      window.dispatchEvent(new Event('logUpdated'));
-    } catch (err) {
-      alert('Delete failed: ' + (err instanceof Error ? err.message : 'unknown'));
-    }
-  };
+  // ---------- Effects ----------
+  useEffect(() => { checkAuthStatus(); }, []);
 
-  const addSavedToDate = async (savedItem, date) => {
-    try {
-      const body = {
-        date: date || new Date().toISOString().slice(0,10),
-        item_name: savedItem.name,
-        calories: Number(savedItem.calories),
-        protein_g: savedItem.protein_g != null ? Number(savedItem.protein_g) : undefined,
-        carbs_g: savedItem.carbs_g != null ? Number(savedItem.carbs_g) : undefined,
-        fat_g: savedItem.fat_g != null ? Number(savedItem.fat_g) : undefined,
-        servings: savedItem.default_servings || 1,
-        source_type: 'saved_food'
-      };
-      const res = await fetch(`${API_BASE}/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
-      const text = await res.text();
-      if (!text) throw new Error('Empty response');
-      const data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Failed to add');
-      await selectDay(date || new Date().toISOString().slice(0,10));
-      window.dispatchEvent(new Event('logUpdated'));
-    } catch (err) {
-      alert('Failed to add saved food: ' + (err instanceof Error ? err.message : 'unknown'));
-    }
-  };
-
-  // Create saved food
-  const [newSaved, setNewSaved] = useState({ name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', default_servings: 1 });
-  const createSavedFood = async () => {
-    if (!newSaved.name || newSaved.calories === '') return alert('Name and calories required');
-    try {
-      const res = await fetch(`${API_BASE}/me/saved_foods`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify({
-        name: newSaved.name,
-        calories: Number(newSaved.calories),
-        protein_g: newSaved.protein_g !== '' ? Number(newSaved.protein_g) : undefined,
-        carbs_g: newSaved.carbs_g !== '' ? Number(newSaved.carbs_g) : undefined,
-        fat_g: newSaved.fat_g !== '' ? Number(newSaved.fat_g) : undefined,
-        default_servings: newSaved.default_servings || 1,
-      })});
-      const txt = await res.text();
-      if (!txt) throw new Error('Empty response');
-      const data = JSON.parse(txt);
-      if (!res.ok) throw new Error(data.error || 'Failed to create');
-      setNewSaved({ name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', default_servings: 1 });
-      await loadSavedFoods();
-    } catch (err) {
-      alert('Create failed: ' + (err instanceof Error ? err.message : 'unknown'));
-    }
-  };
-
-  // Load today's intake/activity and frequent items
-  const loadTodayData = useCallback(async (date) => {
+  useEffect(() => {
     if (!isAuthenticated) return;
-    const d = date || new Date().toISOString().slice(0,10);
-    try {
-      const [intakeRes, activityRes, freqRes] = await Promise.all([
-        fetch(`${API_BASE}/me/intake?date=${d}`, { credentials: 'include' }),
-        fetch(`${API_BASE}/me/activity?date=${d}`, { credentials: 'include' }),
-        fetch(`${API_BASE}/me/intake/frequent`, { credentials: 'include' }),
-      ]);
-
-      if (intakeRes.ok) {
-        const text = await intakeRes.text();
-        if (text) setTodayTotals(JSON.parse(text).totals || null);
-      }
-      if (activityRes.ok) {
-        const text = await activityRes.text();
-        if (text) setTodayActivity(JSON.parse(text).activity || null);
-      }
-      if (freqRes.ok) {
-        const text = await freqRes.text();
-        if (text) setFrequentItems(JSON.parse(text).items || []);
-      }
-    } catch (err) {
-      console.error('Failed to load today data:', err);
-    }
+    loadProfile();
+    loadKeyStatus();
   }, [isAuthenticated]);
+
+  // Signed-in users have no business on the sign-in screen.
+  useEffect(() => {
+    if (isAuthenticated && route === '/signin') {
+      window.history.replaceState({}, '', '/');
+      setRoute('/');
+    }
+  }, [isAuthenticated, route]);
+
+  // Focus the key field when the drawer was opened because of a key error (dialog is open by now).
+  useEffect(() => {
+    if (!showProfileForm || !keyFocus) return;
+    keyInputRef.current?.focus();
+    setKeyFocus(false);
+  }, [showProfileForm, keyFocus]);
 
   useEffect(() => {
     if (isAuthenticated && !profileRequired) {
+      loadInsights(7);
       loadTodayData();
     }
-
-    // listen for log updates from child components
-    const handler = () => {
-      setLastLogUpdate(Date.now());
-    };
-    window.addEventListener('logUpdated', handler);
-    return () => window.removeEventListener('logUpdated', handler);
   }, [isAuthenticated, profileRequired, loadTodayData]);
 
-  // When navigating to calendar page, load month data and saved foods
   useEffect(() => {
-    if (route && route.startsWith && route.startsWith('/calendar') && isAuthenticated) {
+    if (isAuthenticated && !profileRequired) loadTargets();
+    else setTargets(null);
+  }, [isAuthenticated, profileRequired, profile, loadTargets]);
+
+  useEffect(() => {
+    if (!profile) return;
+    const f = prefillRef.current || {};
+    setGoals(profile.goal || f.goal || 'maintain');
+    setTargetCalories(profile.target_calories ?? '');
+    setAllergies(Array.isArray(profile.allergies) ? profile.allergies.join(', ') : '');
+    setCuisine(profile.preferences?.cuisine || '');
+    setCookingTime(profile.preferences?.cookingTime || '');
+    setMealType(profile.preferences?.mealType || '');
+    setAge(profile.age ?? f.age ?? '');
+    setSex(profile.sex || f.sex || '');
+    setHeightCm(profile.height_cm ?? f.height_cm ?? '');
+    setWeightKg(profile.weight_kg ?? f.weight_kg ?? '');
+    setActivityLevel(profile.activity_level || f.activity_level || 'medium');
+    setIntensityPercent(profile.intensity_percent || (f.goal === 'lose' ? -20 : f.goal === 'gain' ? 10 : 0));
+  }, [profile]);
+
+  useEffect(() => {
+    setSteps(todayActivity?.steps ? String(todayActivity.steps) : '');
+  }, [todayActivity]);
+
+  useEffect(() => {
+    if (onCalendar && isAuthenticated) {
       loadCalendar(calendarMonth);
       loadSavedFoods();
     }
   }, [route, calendarMonth, isAuthenticated]);
 
-  // When the small popup is opened, load calendar totals for the month
+  // Entering History: refresh the selected day (defaults to today) so it never shows stale entries.
   useEffect(() => {
-    if (showCalendarPopup && isAuthenticated) {
-      loadCalendar(calendarMonth);
-    }
-  }, [showCalendarPopup, calendarMonth, isAuthenticated]);
-
-  // reload when a new log happens
-  useEffect(() => {
-    if (lastLogUpdate) loadTodayData();
-  }, [lastLogUpdate, loadTodayData]);
+    if (onCalendar && isAuthenticated) selectDay(selectedDate || todayISO());
+  }, [route, isAuthenticated]);
 
   // Reset intensity to sensible defaults when goal changes
   useEffect(() => {
@@ -734,110 +468,31 @@ function App() {
     if (goals === 'gain' && intensityPercent < 0) setIntensityPercent(10);
   }, [goals]);
 
-  const checkAuthStatus = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/auth/status`, {
-        credentials: 'include',
-      });
-      const text = await res.text();
-      if (!text) return;
-      
-      const data = JSON.parse(text);
-      if (data.authenticated) {
-        setIsAuthenticated(true);
-        setUser(data.user);
-      }
-    } catch (err) {
-      console.error('Auth check failed:', err);
-    }
-  };
+  useEffect(() => {
+    if (!response || !resultsRef.current) return;
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    resultsRef.current.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+  }, [response]);
 
-
-  const handleRegister = async (e) => {
+  // ---------- Actions ----------
+  const handleAuth = async (e) => {
     e.preventDefault();
-    setAuthLoading(true);
     setAuthError(null);
-
-    if (password !== confirmPassword) {
+    if (!showLogin && password !== confirmPassword) {
       setAuthError('Passwords do not match');
-      setAuthLoading(false);
       return;
     }
-
+    setAuthLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/auth/register`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ email, password }),
-      });
-
-      const text = await res.text();
-      if (!text) {
-        throw new Error('Empty response from server');
-      }
-
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (parseErr) {
-        console.error('Response text:', text);
-        throw new Error('Invalid response from server');
-      }
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Registration failed');
-      }
-
+      const data = await api(showLogin ? '/auth/login' : '/auth/register', { method: 'POST', body: { email, password } });
       setIsAuthenticated(true);
       setUser(data.user);
       setEmail('');
       setPassword('');
       setConfirmPassword('');
-      // Profile will be loaded automatically via useEffect
+      navigate('/');
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'Registration failed');
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleLogin = async (e) => {
-    e.preventDefault();
-    setAuthLoading(true);
-    setAuthError(null);
-
-    try {
-      const res = await fetch(`${API_BASE}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ email, password }),
-      });
-
-      const text = await res.text();
-      if (!text) {
-        throw new Error('Empty response from server');
-      }
-
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (parseErr) {
-        console.error('Response text:', text);
-        throw new Error('Invalid response from server');
-      }
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Login failed');
-      }
-
-      setIsAuthenticated(true);
-      setUser(data.user);
-      setEmail('');
-      setPassword('');
-    } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'Login failed');
+      setAuthError(err.message || (showLogin ? 'Login failed' : 'Registration failed'));
     } finally {
       setAuthLoading(false);
     }
@@ -845,1481 +500,1430 @@ function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch(`${API_BASE}/auth/logout`, {
-        method: 'POST',
-        credentials: 'include',
-      });
-      setIsAuthenticated(false);
-      setUser(null);
-      setProfile(null);
-      setResponse(null);
+      await api('/auth/logout', { method: 'POST' });
     } catch (err) {
       console.error('Logout failed:', err);
+    }
+    setIsAuthenticated(false);
+    setUser(null);
+    setProfile(null);
+    prefillRef.current = null;
+    setProfileRequired(false);
+    setProfileError(false);
+    setResponse(null);
+    setInsights(null);
+    setCoachResult(null);
+    setTodayTotals(null);
+    setTodayActivity(null);
+    setFrequentItems([]);
+    setTargets(null);
+    setSelectedDate(null);
+    setSelectedDayItems([]);
+    setCalendarTotals([]);
+    setSavedFoods([]);
+    setUserRequest('');
+    setError(null);
+    setShowProfileForm(false);
+    closePhoto();
+    setKeyStatus(null);
+    setKeyStep(null);
+    resetKeyForm();
+    navigate('/');
+  };
+
+  // ---------- AI provider key ----------
+  const resetKeyForm = () => {
+    setKeyInput('');
+    setKeyProvider('auto');
+    setKeyShow(false);
+    setKeyError(null);
+    setKeyReplacing(false);
+  };
+
+  const closeProfile = () => {
+    setShowProfileForm(false);
+    resetKeyForm();
+  };
+
+  // Opens the drawer with the key field ready, e.g. after an AI request failed on the key.
+  const openKeySettings = (reason) => {
+    resetKeyForm();
+    if (typeof reason === 'string') setKeyError(reason);
+    setKeyReplacing(true);
+    setKeyFocus(true);
+    setShowProfileForm(true);
+  };
+
+  // Returns true when the error was about the user's key and has been handled.
+  const handleKeyError = (err) => {
+    if (!KEY_CODES.includes(err?.code)) return false;
+    // The drawer shows the reason inline (role=alert); only the no-credits case, which doesn't open it, needs a toast.
+    if (err.code === 'API_KEY_NO_CREDITS') notify(err.message, 'error');
+    else openKeySettings(err.message);
+    return true;
+  };
+
+  const saveKey = async (e) => {
+    e.preventDefault();
+    const key = keyInput.trim();
+    if (!key) return setKeyError('Paste your API key first.');
+    const provider = keyProvider !== 'auto' ? keyProvider : detectProvider(providers, key)?.id;
+    if (!provider && providers.length) return setKeyError('We can’t tell which provider this key is for. Pick it above.');
+    setKeyError(null);
+    setKeySaving(true);
+    try {
+      const data = await api('/me/api_key', { method: 'PUT', body: { api_key: key, provider } });
+      setKeyStatus(data);
+      resetKeyForm();
+      setKeyStep((s) => (s === 'active' ? 'done' : s));
+      notify(`${data.provider_label || 'Key'} connected, ending in ${data.last4}`);
+    } catch (err) {
+      setKeyError(err.message || 'Couldn’t save the key');
+    } finally {
+      setKeySaving(false);
+    }
+  };
+
+  const removeKey = async () => {
+    if (!window.confirm(`Remove your ${keyStatus?.provider_label || 'AI'} key? AI features stop working until you add one again.`)) return;
+    try {
+      setKeyStatus(await api('/me/api_key', { method: 'DELETE' }));
+      resetKeyForm();
+      notify('Key removed');
+    } catch (err) {
+      notify(`Couldn’t remove key: ${err.message}`, 'error');
     }
   };
 
   const handleSaveProfile = async () => {
     setProfileLoading(true);
     try {
-      const allergiesList = allergies
-        .split(',')
-        .map(a => a.trim())
-        .filter(a => a.length > 0);
-
-      const profileData = {
-        goal: goals,
-        target_calories: targetCalories ? parseInt(targetCalories, 10) : null,
-        age: age ? parseInt(age, 10) : null,
-        sex: sex || null,
-        height_cm: heightCm ? parseInt(heightCm, 10) : null,
-        weight_kg: weightKg ? parseFloat(weightKg) : null,
-        activity_level: activityLevel || null,
-        intensity_percent: intensityPercent,
-        allergies: allergiesList,
-        diet_type: 'none',
-        preferences: {
-          cuisine: cuisine || undefined,
-          cookingTime: cookingTime || undefined,
-          mealType: mealType || undefined,
-        },
-      };
-
-      const res = await fetch(`${API_BASE}/me/profile`, {
+      const data = await api('/me/profile', {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(profileData),
+        body: {
+          goal: goals,
+          target_calories: targetCalories ? parseInt(targetCalories, 10) : null,
+          age: age ? parseInt(age, 10) : null,
+          sex: sex || null,
+          height_cm: heightCm ? parseInt(heightCm, 10) : null,
+          weight_kg: weightKg ? parseFloat(weightKg) : null,
+          activity_level: activityLevel || null,
+          intensity_percent: intensityPercent,
+          allergies: allergies.split(',').map((a) => a.trim()).filter(Boolean),
+          diet_type: 'none',
+          preferences: {
+            cuisine: cuisine || undefined,
+            cookingTime: cookingTime || undefined,
+            mealType: mealType || undefined,
+          },
+        },
       });
-
-      if (!res.ok) {
-        const text = await res.text();
-        let errorMsg = 'Failed to save profile';
-        try {
-          const errorData = JSON.parse(text);
-          errorMsg = errorData.error || errorMsg;
-        } catch (e) {
-          // Use default error message
-        }
-        throw new Error(errorMsg);
-      }
-
-      const text = await res.text();
-      if (text) {
-        const data = JSON.parse(text);
-        const updatedProfile = data.profile;
-        setProfile(updatedProfile);
-        
-        // Check if profile is now complete
-        const isProfileComplete = updatedProfile && 
-          (updatedProfile.goal || updatedProfile.target_calories || 
-           (updatedProfile.allergies && updatedProfile.allergies.length > 0));
-        
-        if (isProfileComplete) {
-          setProfileRequired(false);
-          setShowProfileForm(false);
-        }
+      const updated = data.profile;
+      prefillRef.current = null;
+      setProfile(updated);
+      if (updated && (updated.goal || updated.target_calories || (updated.allergies && updated.allergies.length > 0))) {
+        setProfileRequired(false);
+        setShowProfileForm(false);
+        notify('Profile saved');
       }
     } catch (err) {
-      setAuthError(err instanceof Error ? err.message : 'Failed to save profile');
+      notify(err.message || 'Failed to save profile', 'error');
     } finally {
       setProfileLoading(false);
     }
   };
 
-  const handleSubmit = async (e) => {
-    if (e && e.preventDefault) {
-      e.preventDefault();
+  const logManual = async (date) => {
+    setManualError(null);
+    setManualLoading(true);
+    try {
+      await api('/me/intake', {
+        method: 'POST',
+        body: {
+          date,
+          item_name: manual.name,
+          calories: Number(manual.calories),
+          protein_g: optNum(manual.protein),
+          carbs_g: optNum(manual.carbs),
+          fat_g: optNum(manual.fat),
+          servings: 1,
+          source_type: 'manual',
+        },
+      });
+      notify(`Logged ${manual.name}`);
+      setManual(EMPTY_MANUAL);
+      await refreshLogs(date);
+    } catch (err) {
+      setManualError(err.message || 'Failed to add');
+    } finally {
+      setManualLoading(false);
     }
+  };
+
+  const handleQuickAdd = async (item) => {
+    try {
+      await api('/me/intake', {
+        method: 'POST',
+        body: {
+          date: todayISO(),
+          item_name: item.item_name,
+          calories: Number(item.avg_calories) || 0,
+          protein_g: Number(item.avg_protein) || 0,
+          carbs_g: Number(item.avg_carbs) || 0,
+          fat_g: Number(item.avg_fat) || 0,
+          servings: 1,
+          source_type: item.source_type || 'saved_food',
+        },
+      });
+      notify(`Logged ${item.item_name}`);
+      refreshLogs();
+    } catch (err) {
+      notify(`Couldn’t add item: ${err.message}`, 'error');
+    }
+  };
+
+  const logSteps = async (e) => {
+    e.preventDefault();
+    setStepsSaving(true);
+    try {
+      await api('/me/activity', { method: 'POST', body: { date: todayISO(), steps: Number(steps) || 0 } });
+      notify('Steps saved');
+      refreshLogs();
+    } catch (err) {
+      notify(`Couldn’t save steps: ${err.message}`, 'error');
+    } finally {
+      setStepsSaving(false);
+    }
+  };
+
+  // Resize image file to JPEG base64 to reduce upload size and normalize inputs
+  const fileToResizedBase64 = (file, maxWidth = 1024, quality = 0.8) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        try {
+          resolve(String(canvas.toDataURL('image/jpeg', quality)).replace(/^data:image\/(png|jpeg);base64,/, ''));
+        } catch (err) {
+          reject(err);
+        }
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+
+  const handlePhotoFileChange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ''; // allow picking the same file again
+    if (!file) return;
+    setPhotoUploading(true);
+    setPhotoCandidates([]);
+    setRecipeResults([]);
+    try {
+      const image_base64 = await fileToResizedBase64(file, 1024, 0.78);
+      setPhotoPreviewUrl(`data:image/jpeg;base64,${image_base64}`);
+      const data = await api('/me/intake/from_image', { method: 'POST', body: { date: todayISO(), image_base64 } });
+      setPhotoCandidates(data.candidates || []);
+      setPhotoModalVisible(true);
+    } catch (err) {
+      console.error('Image analysis error:', err);
+      if (!handleKeyError(err)) notify(`Image analysis failed: ${err.message}`, 'error');
+    } finally {
+      setPhotoUploading(false);
+    }
+  };
+
+  const closePhoto = () => {
+    setPhotoModalVisible(false);
+    setPhotoCandidates([]);
+    setPhotoPreviewUrl(null);
+    setRecipeResults([]);
+  };
+
+  const saveCandidateToDate = async (candidate, date) => {
+    try {
+      await api('/me/intake', {
+        method: 'POST',
+        body: {
+          date: date || todayISO(),
+          item_name: candidate.label,
+          calories: Number(candidate.calories || 0),
+          protein_g: candidate.protein_g != null ? Number(candidate.protein_g) : undefined,
+          carbs_g: candidate.carbs_g != null ? Number(candidate.carbs_g) : undefined,
+          fat_g: candidate.fat_g != null ? Number(candidate.fat_g) : undefined,
+          servings: 1,
+          source_type: 'generated_recipe',
+          image_url: photoPreviewUrl || null,
+        },
+      });
+      closePhoto();
+      notify(`Logged ${candidate.label}`);
+      refreshLogs();
+    } catch (err) {
+      notify(`Save failed: ${err.message}`, 'error');
+    }
+  };
+
+  const searchRecipes = async (query) => {
+    if (!query) return;
+    setRecipeLoading(true);
+    setRecipeResults([]);
+    try {
+      const data = await api('/me/search_recipe', { method: 'POST', body: { query } });
+      setRecipeResults((data.recipes || []).map((r) => ({
+        title: r.title || r.name || 'Recipe',
+        source_url: r.url || r.source_url || null,
+        image_url: r.image || null,
+        daily_contribution: r.summary || null,
+        source: r.source || undefined,
+      })));
+    } catch (err) {
+      console.error('Recipe search failed:', err);
+      if (!handleKeyError(err)) notify(`Recipe search failed: ${err.message}`, 'error');
+    } finally {
+      setRecipeLoading(false);
+    }
+  };
+
+  const addRecipeToLog = async (recipe, servings) => {
+    const n = recipe.nutrients || {};
+    const scaled = (v) => (v != null ? Number(v) * servings : undefined);
+    try {
+      await api('/me/intake', {
+        method: 'POST',
+        body: {
+          date: todayISO(),
+          item_name: recipe.title || 'Recipe',
+          calories: (n.calories != null ? Number(n.calories) : 0) * servings,
+          protein_g: scaled(n.protein_g),
+          carbs_g: scaled(n.carbs_g),
+          fat_g: scaled(n.fat_g),
+          servings,
+          source_type: 'generated_recipe',
+        },
+      });
+      notify(`Added ${recipe.title || 'recipe'} to today`);
+      refreshLogs();
+    } catch (err) {
+      notify(`Couldn’t add to log: ${err.message}`, 'error');
+    }
+  };
+
+  const askCoach = async (days = 7) => {
+    setCoachLoading(true);
+    setCoachResult(null);
+    try {
+      setCoachResult(await api('/me/coach', { method: 'POST', body: { days } }));
+    } catch (err) {
+      console.error('Coach request failed:', err);
+      handleKeyError(err);
+      setCoachResult({ error: err.message, code: err.code });
+    } finally {
+      setCoachLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e?.preventDefault?.();
     setLoading(true);
     setError(null);
     setResponse(null);
-
     try {
-      const res = await fetch(`${API_BASE}/me/plan_meal`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          request: userRequest || undefined,
-        }),
-      });
-
-      const text = await res.text();
-      if (!text) {
-        throw new Error('Empty response from server');
-      }
-
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (parseErr) {
-        console.error('Response text:', text);
-        throw new Error('Invalid response from server');
-      }
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to get meal plan');
-      }
-
-      setResponse(data);
+      setResponse(await api('/me/plan_meal', { method: 'POST', body: { request: userRequest || undefined } }));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      if (!handleKeyError(err)) setError(err.message || 'An error occurred');
     } finally {
       setLoading(false);
     }
   };
 
-  // Handler for 'Photo to Recipe' input (used in meal plan form)
-  const handlePhotoToRecipe = async (e) => {
-    e.preventDefault && e.preventDefault();
-    const file = e.target.files && e.target.files[0];
-    if (!file) return;
+  const startEdit = (item) => {
+    setEditingId(item.id);
+    setEditFields({
+      item_name: item.item_name || '',
+      calories: item.calories ?? '',
+      protein_g: item.protein_g ?? '',
+      carbs_g: item.carbs_g ?? '',
+      fat_g: item.fat_g ?? '',
+      servings: item.servings || 1,
+    });
+  };
+
+  const saveEdit = async (id) => {
     try {
-      const resizedBase64 = await fileToResizedBase64(file, 1024, 0.78);
-      const dataUrl = `data:image/jpeg;base64,${resizedBase64}`;
-      setPhotoPreviewUrl(dataUrl);
-      // Submit to backend for analysis and open modal when done
-      await submitImageForAnalysis(resizedBase64);
+      await api(`/me/intake/${id}`, {
+        method: 'PUT',
+        body: {
+          item_name: editFields.item_name,
+          calories: Number(editFields.calories),
+          protein_g: editFields.protein_g !== '' ? Number(editFields.protein_g) : null,
+          carbs_g: editFields.carbs_g !== '' ? Number(editFields.carbs_g) : null,
+          fat_g: editFields.fat_g !== '' ? Number(editFields.fat_g) : null,
+          servings: editFields.servings !== '' ? Number(editFields.servings) : 1,
+        },
+      });
+      setEditingId(null);
+      notify('Entry updated');
+      await refreshLogs(selectedDate);
     } catch (err) {
-      console.error('Photo to recipe failed:', err);
-      alert('Failed to analyze image: ' + (err instanceof Error ? err.message : String(err)));
+      notify(`Couldn’t save: ${err.message}`, 'error');
     }
   };
 
-  // Show login/register if not authenticated
+  const removeItem = async (item) => {
+    if (!window.confirm(`Delete ${item.item_name}?`)) return;
+    try {
+      await api(`/me/intake/${item.id}`, { method: 'DELETE' });
+      notify(`Deleted ${item.item_name}`);
+      await refreshLogs(selectedDate);
+    } catch (err) {
+      notify(`Delete failed: ${err.message}`, 'error');
+    }
+  };
+
+  const addSavedToDate = async (savedItem, date) => {
+    const day = date || todayISO();
+    try {
+      await api('/me/intake', {
+        method: 'POST',
+        body: {
+          date: day,
+          item_name: savedItem.name,
+          calories: Number(savedItem.calories),
+          protein_g: savedItem.protein_g != null ? Number(savedItem.protein_g) : undefined,
+          carbs_g: savedItem.carbs_g != null ? Number(savedItem.carbs_g) : undefined,
+          fat_g: savedItem.fat_g != null ? Number(savedItem.fat_g) : undefined,
+          servings: savedItem.default_servings || 1,
+          source_type: 'saved_food',
+        },
+      });
+      notify(`Logged ${savedItem.name}`);
+      await refreshLogs(day);
+    } catch (err) {
+      notify(`Couldn’t add saved food: ${err.message}`, 'error');
+    }
+  };
+
+  const createSavedFood = async () => {
+    if (!newSaved.name || newSaved.calories === '') return notify('Name and calories are required', 'error');
+    try {
+      await api('/me/saved_foods', {
+        method: 'POST',
+        body: {
+          name: newSaved.name,
+          calories: Number(newSaved.calories),
+          protein_g: optNum(newSaved.protein_g),
+          carbs_g: optNum(newSaved.carbs_g),
+          fat_g: optNum(newSaved.fat_g),
+          default_servings: newSaved.default_servings || 1,
+        },
+      });
+      notify(`Saved ${newSaved.name}`);
+      setNewSaved(EMPTY_SAVED);
+      await loadSavedFoods();
+    } catch (err) {
+      notify(`Create failed: ${err.message}`, 'error');
+    }
+  };
+
+  const setM = (k) => (e) => setManual((m) => ({ ...m, [k]: e.target.value }));
+  const setE = (k) => (e) => setEditFields((f) => ({ ...f, [k]: e.target.value }));
+  const setS = (k) => (e) => setNewSaved((s) => ({ ...s, [k]: e.target.value }));
+  const openPhotoPicker = () => imageInputRef.current?.click();
+
+  // ---------- Shared blocks ----------
+  const manualForm = (date, idPrefix, submitLabel) => (
+    <form onSubmit={(e) => { e.preventDefault(); logManual(date); }} className="space-y-3">
+      <div className="grid grid-cols-[1fr_6.5rem] gap-3">
+        <div>
+          <label htmlFor={`${idPrefix}-name`} className="label">Food</label>
+          <input id={`${idPrefix}-name`} required className="field" value={manual.name} onChange={setM('name')} placeholder="Greek yogurt" autoComplete="off" />
+        </div>
+        <div>
+          <label htmlFor={`${idPrefix}-kcal`} className="label">kcal</label>
+          <input id={`${idPrefix}-kcal`} required type="number" min={0} step="any" inputMode="decimal" className="field num" value={manual.calories} onChange={setM('calories')} placeholder="150" />
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {MACROS.map((m) => (
+          <div key={m.key}>
+            <label htmlFor={`${idPrefix}-${m.key}`} className="label flex items-center gap-1.5">
+              <span className={`size-2 rounded-full ${m.dot}`} aria-hidden="true" />{m.label}
+            </label>
+            <input id={`${idPrefix}-${m.key}`} type="number" min={0} step="any" inputMode="decimal" className="field num" value={manual[m.key]} onChange={setM(m.key)} placeholder="g" />
+          </div>
+        ))}
+      </div>
+      {manualError && (
+        <p role="alert" className="flex items-center gap-2 text-sm text-danger"><WarningCircleIcon size={16} />{manualError}</p>
+      )}
+      <button type="submit" disabled={manualLoading} className="btn-primary w-full">
+        <PlusIcon size={18} weight="bold" />{manualLoading ? 'Adding…' : submitLabel}
+      </button>
+    </form>
+  );
+
+  // Only one of these renders at a time (onboarding or the drawer), so they share state and the ref.
+  const detected = detectProvider(providers, keyInput);
+  const chosen = keyProvider !== 'auto' ? providers.find((p) => p.id === keyProvider) : detected;
+  const keyForm = (idPrefix, extraAction) => (
+    <form onSubmit={saveKey} noValidate className="space-y-4">
+      {providers.length > 0 && (
+        <div>
+          <label htmlFor={`${idPrefix}-prov`} className="label">Provider</label>
+          <select
+            id={`${idPrefix}-prov`}
+            className="field"
+            value={keyProvider}
+            onChange={(e) => { setKeyProvider(e.target.value); setKeyError(null); }}
+          >
+            <option value="auto">{detected ? `Detect from key: ${detected.label}` : 'Detect from key'}</option>
+            {providers.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+          <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-ink-2">
+            {chosen ? (
+              <a href={chosen.keyUrl} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 font-medium text-accent hover:underline">
+                Get your {chosen.label} key<ArrowSquareOutIcon size={14} aria-hidden="true" />
+              </a>
+            ) : 'Works with OpenAI, Anthropic, Google Gemini, OpenRouter, Groq, Perplexity, xAI, Mistral and DeepSeek.'}
+          </p>
+          {chosen && (!chosen.vision || !chosen.webSearch) && (
+            <ul className="mt-2 space-y-1 text-sm text-ink-2">
+              {!chosen.vision && <li>Photo logging isn’t available with {chosen.label}.</li>}
+              {!chosen.webSearch && <li>Meal plans are written by the model, without live web search.</li>}
+            </ul>
+          )}
+        </div>
+      )}
+      <div>
+        <label htmlFor={`${idPrefix}-key`} className="label">API key</label>
+        <div className="relative">
+          <input
+            ref={keyInputRef}
+            id={`${idPrefix}-key`}
+            name="ai_api_key"
+            type={keyShow ? 'text' : 'password'}
+            autoComplete="off"
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            placeholder={chosen?.placeholder || 'Paste your key'}
+            value={keyInput}
+            onChange={(e) => { setKeyInput(e.target.value); setKeyError(null); }}
+            aria-invalid={keyError ? true : undefined}
+            aria-describedby={keyError ? `${idPrefix}-key-err` : undefined}
+            className="field pr-12"
+          />
+          <button
+            type="button"
+            className="icon-btn absolute right-0 top-0"
+            aria-label="Show key"
+            aria-pressed={keyShow}
+            onClick={() => setKeyShow((v) => !v)}
+          >
+            {keyShow ? <EyeSlashIcon size={20} /> : <EyeIcon size={20} />}
+          </button>
+        </div>
+        {keyError && (
+          <p id={`${idPrefix}-key-err`} role="alert" className="mt-2 flex items-start gap-2 text-sm text-danger">
+            <WarningCircleIcon size={16} className="mt-0.5 shrink-0" />{keyError}
+          </p>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="submit" disabled={keySaving} className="btn-primary">
+          <KeyIcon size={18} weight="bold" />{keySaving ? 'Checking key…' : 'Save key'}
+        </button>
+        {extraAction}
+      </div>
+    </form>
+  );
+
+  const securityNote = (
+    <p className="flex items-start gap-2.5 rounded-2xl bg-surface-2/60 p-4 text-sm leading-relaxed text-ink-2">
+      <ShieldCheckIcon size={20} className="mt-px shrink-0 text-accent" aria-hidden="true" />
+      Encrypted on our server with AES-256-GCM. We only ever show the last 4 characters, and you can replace or remove it any time.
+    </p>
+  );
+
+  const keySection = (
+    <section aria-labelledby="key-h" className="space-y-4 rounded-2xl border border-line p-5">
+      <h3 id="key-h" className="flex items-center gap-2 text-base font-semibold">
+        <KeyIcon size={20} className="text-accent" aria-hidden="true" />AI provider key
+      </h3>
+      {keyStatus?.has_key && !keyReplacing ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="mr-auto text-[15px] text-ink-2">
+            Connected to <span className="font-semibold text-ink">{keyStatus.provider_label || 'your provider'}</span>, ending in <span className="num font-semibold text-ink">{keyStatus.last4}</span>
+          </p>
+          <button type="button" className="btn-ghost h-10 px-4 text-sm" onClick={() => { resetKeyForm(); setKeyReplacing(true); setKeyFocus(true); }}>Replace</button>
+          <button type="button" className="btn-quiet h-10 px-4 text-sm hover:text-danger" onClick={removeKey}>
+            <TrashIcon size={16} aria-hidden="true" />Remove
+          </button>
+        </div>
+      ) : (
+        <>
+          <p className="text-sm text-ink-2">
+            {keyStatus?.has_key
+              ? 'Paste a new key to replace the saved one.'
+              : 'Photo logging, meal plans and the coach run on your own AI provider account.'}
+          </p>
+          {keyForm('kp', keyStatus?.has_key && (
+            <button type="button" className="btn-quiet" onClick={resetKeyForm}>Cancel</button>
+          ))}
+          {securityNote}
+        </>
+      )}
+    </section>
+  );
+
+  const profileForm = (
+    <form onSubmit={(e) => { e.preventDefault(); handleSaveProfile(); }} className="space-y-8">
+      <fieldset>
+        <legend className="label">Goal</legend>
+        <div className="grid grid-cols-3 gap-2">
+          {GOALS.map(({ value, label, icon: Icon }) => (
+            <label
+              key={value}
+              className={`flex cursor-pointer flex-col items-center gap-2 rounded-2xl border p-4 text-center text-sm font-medium transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent ${goals === value ? 'border-accent bg-accent-soft text-ink' : 'border-line text-ink-2 hover:border-ink-2/40 hover:text-ink'}`}
+            >
+              <input type="radio" name="goal" value={value} checked={goals === value} onChange={(e) => setGoals(e.target.value)} className="sr-only" required={profileRequired} />
+              <Icon size={22} weight={goals === value ? 'bold' : 'regular'} aria-hidden="true" />
+              {label}
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      <fieldset className="space-y-4">
+        <legend className="text-base font-semibold">Body</legend>
+        <p className="!mt-1 text-sm text-ink-2">Used to calculate your daily energy needs (BMR, then TDEE).</p>
+        <div className="grid grid-cols-2 gap-4">
+          <div>
+            <label htmlFor="p-age" className="label">Age</label>
+            <input id="p-age" type="number" min={1} max={120} inputMode="numeric" value={age} onChange={(e) => setAge(e.target.value)} placeholder="30" className="field num" />
+          </div>
+          <div>
+            <label htmlFor="p-sex" className="label">Sex</label>
+            <select id="p-sex" value={sex} onChange={(e) => setSex(e.target.value)} className="field">
+              <option value="">Select</option>
+              <option value="male">Male</option>
+              <option value="female">Female</option>
+            </select>
+          </div>
+          <div>
+            <label htmlFor="p-height" className="label">Height (cm)</label>
+            <input id="p-height" type="number" min={1} inputMode="numeric" value={heightCm} onChange={(e) => setHeightCm(e.target.value)} placeholder="170" className="field num" />
+          </div>
+          <div>
+            <label htmlFor="p-weight" className="label">Weight (kg)</label>
+            <input id="p-weight" type="number" min={0} step={0.1} inputMode="decimal" value={weightKg} onChange={(e) => setWeightKg(e.target.value)} placeholder="70" className="field num" />
+          </div>
+        </div>
+
+        <div>
+          <span className="label" id="p-activity">Activity level</span>
+          <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-labelledby="p-activity">
+            {ACTIVITY.map((a) => (
+              <label
+                key={a.value}
+                className={`cursor-pointer rounded-2xl border px-3 py-3 text-center transition has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-accent ${activityLevel === a.value ? 'border-accent bg-accent-soft' : 'border-line hover:border-ink-2/40'}`}
+              >
+                <input type="radio" name="activity" value={a.value} checked={activityLevel === a.value} onChange={(e) => setActivityLevel(e.target.value)} className="sr-only" />
+                <span className="block text-sm font-medium">{a.label}</span>
+                <span className="block text-xs text-ink-2">{a.hint}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+
+        {(goals === 'lose' || goals === 'gain') && (
+          <div>
+            <label htmlFor="p-intensity" className="label flex justify-between">
+              <span>{goals === 'lose' ? 'Deficit' : 'Surplus'}</span>
+              <span className="num font-semibold text-ink">{intensityPercent > 0 ? '+' : ''}{intensityPercent}%</span>
+            </label>
+            <input
+              id="p-intensity"
+              type="range"
+              min={goals === 'lose' ? -30 : 0}
+              max={goals === 'gain' ? 20 : 0}
+              step={5}
+              value={goals === 'lose' ? Math.max(-30, Math.min(0, intensityPercent)) : Math.max(0, Math.min(20, intensityPercent))}
+              onChange={(e) => setIntensityPercent(Number(e.target.value))}
+              className="w-full cursor-pointer"
+            />
+            <p className="mt-1 text-xs text-ink-2">
+              {goals === 'lose' ? 'For example, −20% eats about 0.8× your TDEE.' : 'For example, +10% eats about 1.1× your TDEE.'}
+            </p>
+          </div>
+        )}
+      </fieldset>
+
+      <fieldset className="space-y-4">
+        <legend className="text-base font-semibold">Targets and diet</legend>
+        <div>
+          <label htmlFor="p-target" className="label">Target calories (optional)</label>
+          <input id="p-target" type="number" inputMode="numeric" value={targetCalories} onChange={(e) => setTargetCalories(e.target.value)} placeholder="Leave empty to use your calculated target" className="field num" />
+        </div>
+        <div>
+          <label htmlFor="p-allergies" className="label">Allergies or restrictions</label>
+          <input id="p-allergies" type="text" value={allergies} onChange={(e) => setAllergies(e.target.value)} placeholder="nuts, dairy, gluten" className="field" />
+          <p className="mt-1.5 text-xs text-ink-2">Separate with commas.</p>
+        </div>
+      </fieldset>
+
+      <fieldset className="space-y-4">
+        <legend className="text-base font-semibold">Meal preferences</legend>
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div>
+            <label htmlFor="p-cuisine" className="label">Cuisine</label>
+            <input id="p-cuisine" type="text" value={cuisine} onChange={(e) => setCuisine(e.target.value)} placeholder="Italian, Asian" className="field" />
+          </div>
+          <div>
+            <label htmlFor="p-time" className="label">Cooking time</label>
+            <input id="p-time" type="text" value={cookingTime} onChange={(e) => setCookingTime(e.target.value)} placeholder="Under 30 min" className="field" />
+          </div>
+          <div>
+            <label htmlFor="p-meal" className="label">Meal type</label>
+            <input id="p-meal" type="text" value={mealType} onChange={(e) => setMealType(e.target.value)} placeholder="Dinner" className="field" />
+          </div>
+        </div>
+      </fieldset>
+
+      <button type="submit" disabled={profileLoading} className="btn-primary w-full">
+        {profileLoading ? 'Saving…' : profileRequired ? 'Save and continue' : 'Save profile'}
+      </button>
+    </form>
+  );
+
+  // ---------- Screens ----------
+  if (!authChecked || (isAuthenticated && ((!profile && !profileRequired && !profileError) || !keyStatus))) return <Splash />;
+
+  if (!isAuthenticated && route === '/') {
+    return (
+      <Suspense fallback={<Splash />}>
+        <Landing
+          onSignIn={() => { setShowLogin(true); setAuthError(null); navigate('/signin'); }}
+          onCreateAccount={(p) => {
+            // From the landing calculator: the profile step starts from what they already entered.
+            prefillRef.current = p || null;
+            setShowLogin(false); setAuthError(null); navigate('/signin');
+          }}
+        />
+      </Suspense>
+    );
+  }
+
   if (!isAuthenticated) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 flex items-center justify-center py-8 px-4">
-        <div className="max-w-md w-full bg-white rounded-lg shadow-lg p-8">
-          <h1 className="text-3xl font-bold text-center mb-2 text-gray-800">
-            🥗 Healthy Diet Tracker Assistant
-          </h1>
-          <p className="text-center text-gray-600 mb-6">
-            AI-powered meal planning with Perplexity Sonar
-          </p>
-
-          <div className="flex gap-2 mb-6">
-            <button
-              onClick={() => {
-                setShowLogin(true);
-                setAuthError(null);
-              }}
-              className={`flex-1 py-2 px-4 rounded-md font-medium ${
-                showLogin
-                  ? 'bg-green-600 text-white'
-                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }`}
-            >
-              Login
-            </button>
-            <button
-              onClick={() => {
-                setShowLogin(false);
-                setAuthError(null);
-              }}
-              className={`flex-1 py-2 px-4 rounded-md font-medium ${
-                !showLogin
-                  ? 'bg-green-600 text-white'
-                  : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-              }`}
-            >
-              Register
-            </button>
-          </div>
-
-          {authError && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md mb-4">
-              {authError}
-            </div>
-          )}
-
-          {showLogin ? (
-            <form onSubmit={handleLogin} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Email
-                </label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="your@email.com"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Password
-                </label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="••••••••"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={authLoading}
-                className="w-full bg-green-600 text-white py-3 px-4 rounded-md font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {authLoading ? 'Logging in...' : 'Login'}
-              </button>
-            </form>
-          ) : (
-            <form onSubmit={handleRegister} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Email
-                </label>
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="your@email.com"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Password
-                </label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  minLength={6}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="••••••••"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Confirm Password
-                </label>
-                <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  required
-                  minLength={6}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  placeholder="••••••••"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={authLoading}
-                className="w-full bg-green-600 text-white py-3 px-4 rounded-md font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {authLoading ? 'Registering...' : 'Register'}
-              </button>
-            </form>
-          )}
-        </div>
-
-        {showCalendarPopup && (
-          <div className="absolute right-0 top-full mt-2 z-50 w-96 bg-white rounded-lg shadow-lg p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <button onClick={() => { const prev = new Date(calendarMonth + '-01'); prev.setMonth(prev.getMonth() - 1); const m = prev.toISOString().slice(0,7); setCalendarMonth(m); loadCalendar(m); }} className="px-2 py-1 border rounded">◀</button>
-                <div className="font-medium">{new Date(calendarMonth + '-01').toLocaleString(undefined, { month: 'long', year: 'numeric' })}</div>
-                <button onClick={() => { const next = new Date(calendarMonth + '-01'); next.setMonth(next.getMonth() + 1); const m = next.toISOString().slice(0,7); setCalendarMonth(m); loadCalendar(m); }} className="px-2 py-1 border rounded">▶</button>
-              </div>
-              <div>
-                <button onClick={() => setShowCalendarPopup(false)} className="px-2 py-1 text-sm text-gray-600">Close</button>
-              </div>
-            </div>
-
-            {/* Calendar grid */}
-            <div className="grid grid-cols-7 gap-1 text-center text-sm">
-              {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d => (
-                <div key={d} className="text-xs text-gray-500">{d}</div>
-              ))}
-
-              {(() => {
-                const [y, m] = calendarMonth.split('-').map(Number);
-                const first = new Date(y, m - 1, 1);
-                const start = first.getDay();
-                const days = new Date(y, m, 0).getDate();
-                const cells = [];
-                const activeSet = new Set((calendarTotals || []).map(t => t.date));
-                for (let i = 0; i < start; i++) cells.push(<div key={`b${i}`} />);
-                for (let d = 1; d <= days; d++) {
-                  const dateStr = `${calendarMonth}-${String(d).padStart(2,'0')}`;
-                  const isActive = activeSet.has(dateStr);
-                  cells.push(
-                    <button
-                      key={dateStr}
-                      onClick={() => { setSelectedDate(dateStr); selectDay(dateStr); }}
-                      className={`p-2 rounded ${isActive ? 'bg-blue-600 text-white' : 'hover:bg-gray-100'}`}
-                    >
-                      {d}
-                    </button>
-                  );
-                }
-                return cells;
-              })()}
-            </div>
-
-            {/* Day details + quick add/edit */}
-            <div className="mt-3">
-              <div className="font-semibold mb-2">{selectedDate ? `Entries for ${selectedDate}` : 'Select a date'}</div>
-              {selectedDate && (
-                <div className="space-y-2 max-h-60 overflow-auto">
-                  {selectedDayItems.length === 0 && <div className="text-sm text-gray-500">No items logged</div>}
-                  {selectedDayItems.map(item => (
-                    <div key={item.id} className="p-2 border rounded flex items-start justify-between">
-                      <div>
-                        <div className="font-medium">{item.item_name}</div>
-                        <div className="text-xs text-gray-600">{Math.round(item.calories || 0)} kcal • {item.servings || 1} serving(s)</div>
-                      </div>
-                      <div className="ml-3 flex flex-col gap-2">
-                        <button onClick={() => startEdit(item)} className="px-2 py-1 bg-blue-500 text-white rounded text-sm">Edit</button>
-                        <button onClick={() => removeItem(item.id)} className="px-2 py-1 bg-red-600 text-white rounded text-sm">Delete</button>
-                      </div>
-                    </div>
-                  ))}
-
-                  <div className="p-2 border rounded">
-                    <div className="text-sm font-medium mb-2">Add manual entry</div>
-                    <input className="w-full border px-2 py-1 mb-2" placeholder="Name" value={manualName} onChange={(e) => setManualName(e.target.value)} />
-                    <input className="w-full border px-2 py-1 mb-2" placeholder="Calories" value={manualCalories} onChange={(e) => setManualCalories(e.target.value)} />
-                    <div className="flex gap-2 mb-2">
-                      <input className="flex-1 border px-2 py-1" placeholder="Protein g" value={manualProtein} onChange={(e) => setManualProtein(e.target.value)} />
-                      <input className="flex-1 border px-2 py-1" placeholder="Carbs g" value={manualCarbs} onChange={(e) => setManualCarbs(e.target.value)} />
-                      <input className="flex-1 border px-2 py-1" placeholder="Fat g" value={manualFat} onChange={(e) => setManualFat(e.target.value)} />
-                    </div>
-                    <div className="flex gap-2">
-                      <button onClick={() => addManualToDate(selectedDate)} className="px-3 py-1 bg-green-600 text-white rounded">Add</button>
-                      <button onClick={() => { setManualName(''); setManualCalories(''); setManualProtein(''); setManualCarbs(''); setManualFat(''); setManualServings(1); }} className="px-3 py-1 border rounded">Clear</button>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // Main app (authenticated)
-  if (route && route.startsWith && route.startsWith('/calendar')) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 py-8 px-4">
-        <div className="max-w-5xl mx-auto">
-          <div className="bg-white rounded-lg shadow-lg w-full p-6 mb-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold">Calendar — History & Edit Logs</h3>
-              <div className="flex gap-2 items-center">
-                <button onClick={() => { const prev = new Date(calendarMonth + '-01'); prev.setMonth(prev.getMonth() - 1); setCalendarMonth(prev.toISOString().slice(0,7)); loadCalendar(prev.toISOString().slice(0,7)); }} className="px-2 py-1 border rounded">◀</button>
-                <div className="px-3 py-1 bg-gray-50 rounded">{calendarMonth}</div>
-                <button onClick={() => { const next = new Date(calendarMonth + '-01'); next.setMonth(next.getMonth() + 1); setCalendarMonth(next.toISOString().slice(0,7)); loadCalendar(next.toISOString().slice(0,7)); }} className="px-2 py-1 border rounded">▶</button>
-                <button onClick={() => navigate('/')} className="ml-4 px-3 py-1 bg-red-600 text-white rounded">Close</button>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="col-span-1 bg-gray-50 p-3 rounded">
-                <h4 className="font-semibold mb-2">{new Date(calendarMonth + '-01').toLocaleString(undefined, { month: 'long', year: 'numeric' })}</h4>
-
-                {/* Full month calendar grid */}
-                <div className="grid grid-cols-7 gap-1 mb-3 text-center">
-                  {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d, i) => (
-                    <div key={`hdr-${i}`} className="text-xs text-gray-500 font-medium">{d}</div>
-                  ))}
-
-                  {(() => {
-                    const [y, m] = calendarMonth.split('-').map(Number);
-                    const year = y, monthIndex = m - 1;
-                    const first = new Date(year, monthIndex, 1);
-                    const start = first.getDay();
-                    const days = new Date(year, monthIndex + 1, 0).getDate();
-                    const cells = [];
-                    const activeSet = new Set((calendarTotals || []).map(t => t.date));
-                    for (let i = 0; i < start; i++) cells.push(<div key={`b-${i}`} />);
-                    for (let d = 1; d <= days; d++) {
-                      const dateStr = `${calendarMonth}-${String(d).padStart(2,'0')}`;
-                      const hasData = activeSet.has(dateStr);
-                      const isSelected = selectedDate === dateStr;
-                      cells.push(
-                        <button
-                          key={dateStr}
-                          onClick={() => { setSelectedDate(dateStr); selectDay(dateStr); }}
-                          className={`h-10 w-10 rounded flex items-center justify-center text-sm ${isSelected ? 'bg-blue-700 text-white' : hasData ? 'bg-blue-100 text-blue-800' : 'hover:bg-gray-100'}`}
-                          title={hasData ? `Has data: ${dateStr}` : dateStr}
-                        >
-                          {d}
-                        </button>
-                      );
-                    }
-                    while (cells.length % 7 !== 0) cells.push(<div key={`pad-${cells.length}`} />);
-                    return cells;
-                  })()}
-                </div>
-
-                <h5 className="font-semibold mb-2">Month totals</h5>
-                <div className="space-y-2 text-sm">
-                  {calendarTotals.length === 0 && <div className="text-gray-500">No data for this month</div>}
-                  {calendarTotals.map((d) => (
-                    <div key={d.date} className="flex items-center justify-between p-2 rounded hover:bg-white">
-                      <div>
-                        <div className="font-medium">{d.date}</div>
-                        <div className="text-xs text-gray-500">{Math.round(d.calories_total || 0)} kcal</div>
-                      </div>
-                      <div>
-                        <button onClick={() => { selectDay(d.date); setSelectedDate(d.date); }} className="px-2 py-1 bg-blue-600 text-white rounded text-sm">View</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="col-span-2 bg-white p-3 rounded">
-                <h4 className="font-semibold mb-2">{selectedDate ? `Entries for ${selectedDate}` : 'Select a day'}</h4>
-                {!selectedDate && <div className="text-sm text-gray-500 mb-2">Click a day from the Month totals to view or edit entries.</div>}
-                {selectedDate && (
-                  <div>
-                    <div className="space-y-3">
-                      {selectedDayItems.length === 0 && <div className="text-gray-500">No items logged</div>}
-                      {selectedDayItems.map((item) => (
-                        <div key={item.id} className="p-2 border rounded flex items-start justify-between">
-                          <div className="flex-1">
-                            {editingId === item.id ? (
-                              <div className="space-y-2">
-                                <input className="w-full border px-2 py-1" value={editFields.item_name} onChange={(e) => setEditFields({...editFields, item_name: e.target.value})} />
-                                <div className="grid grid-cols-4 gap-2 mt-1">
-                                  <input className="border px-2 py-1" value={editFields.calories} onChange={(e) => setEditFields({...editFields, calories: e.target.value})} placeholder="kcal" />
-                                  <input className="border px-2 py-1" value={editFields.protein_g} onChange={(e) => setEditFields({...editFields, protein_g: e.target.value})} placeholder="protein g" />
-                                  <input className="border px-2 py-1" value={editFields.carbs_g} onChange={(e) => setEditFields({...editFields, carbs_g: e.target.value})} placeholder="carbs g" />
-                                  <input className="border px-2 py-1" value={editFields.fat_g} onChange={(e) => setEditFields({...editFields, fat_g: e.target.value})} placeholder="fat g" />
-                                </div>
-                              </div>
-                            ) : (
-                              <div>
-                                <div className="font-medium">{item.item_name}</div>
-                                <div className="text-xs text-gray-600">{Math.round(item.calories || 0)} kcal • {item.servings || 1} serving(s)</div>
-                              </div>
-                            )}
-                          </div>
-                          <div className="ml-3 flex flex-col gap-2">
-                            {editingId === item.id ? (
-                              <>
-                                <button onClick={() => saveEdit(item.id)} className="px-2 py-1 bg-green-600 text-white rounded text-sm">Save</button>
-                                <button onClick={() => setEditingId(null)} className="px-2 py-1 border rounded text-sm">Cancel</button>
-                              </>
-                            ) : (
-                              <>
-                                <button onClick={() => startEdit(item)} className="px-2 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm">Edit</button>
-                                <button onClick={() => removeItem(item.id)} className="px-2 py-1 bg-red-600 text-white rounded text-sm">Delete</button>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    <div className="mt-4">
-                      <h5 className="font-semibold mb-2">Add saved/predefined food</h5>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                        <div className="space-y-2">
-                          {savedLoading && <div className="text-sm text-gray-500">Loading saved foods…</div>}
-                          {savedFoods.slice(0,10).map((s) => (
-                            <div key={s.id} className="flex items-center justify-between p-2 border rounded">
-                              <div className="text-sm">
-                                <div className="font-medium">{s.name}</div>
-                                <div className="text-xs text-gray-500">{Math.round(s.calories || 0)} kcal</div>
-                              </div>
-                              <div>
-                                <button onClick={() => addSavedToDate(s, selectedDate)} className="px-2 py-1 bg-blue-600 text-white rounded text-sm">Add</button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-
-                        <div className="p-2 border rounded">
-                          <div className="text-sm font-medium mb-2">Create saved food</div>
-                          <input className="w-full border px-2 py-1 mb-2" placeholder="Name" value={newSaved.name} onChange={(e) => setNewSaved({...newSaved, name: e.target.value})} />
-                          <input className="w-full border px-2 py-1 mb-2" placeholder="Calories" value={newSaved.calories} onChange={(e) => setNewSaved({...newSaved, calories: e.target.value})} />
-                          <input className="flex-1 border px-2 py-1" placeholder="Protein g" value={newSaved.protein_g} onChange={(e) => setNewSaved({...newSaved, protein_g: e.target.value})} />
-                          <input className="flex-1 border px-2 py-1" placeholder="Carbs g" value={newSaved.carbs_g} onChange={(e) => setNewSaved({...newSaved, carbs_g: e.target.value})} />
-                          <input className="flex-1 border px-2 py-1 mb-2" placeholder="Fat g" value={newSaved.fat_g} onChange={(e) => setNewSaved({...newSaved, fat_g: e.target.value})} />
-                          <div className="flex gap-2">
-                            <button onClick={createSavedFood} className="px-3 py-1 bg-green-600 text-white rounded">Create</button>
-                            <button onClick={() => setNewSaved({ name: '', calories: '', protein_g: '', carbs_g: '', fat_g: '', default_servings: 1 })} className="px-3 py-1 border rounded">Clear</button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-green-50 to-blue-50 py-8 px-4">
-      <div className="max-w-4xl mx-auto">
-        <div className="relative flex justify-between items-center mb-6">
-          <div>
-            <h1 className="text-4xl font-bold text-gray-800">🥗 Healthy Diet Tracker Assistant</h1>
-            <p className="text-gray-600">Welcome, {user?.email}</p>
-          </div>
-          <div className="flex gap-2">
-            {/* History / Calendar button */}
-            {!profileRequired && (
-              <button
-                onClick={() => navigate('/calendar')}
-                title="View history & edit logs"
-                className="bg-white border px-3 py-2 rounded-md hover:bg-gray-50 text-gray-700"
-              >
-                📅
-              </button>
-            )}
-            {!profileRequired && (
-              <button
-                onClick={() => setShowProfileForm(!showProfileForm)}
-                className="bg-blue-600 text-white py-2 px-4 rounded-md font-medium hover:bg-blue-700"
-              >
-                {showProfileForm ? 'Hide Profile' : 'Edit Profile'}
-              </button>
-            )}
-            <button
-              onClick={handleLogout}
-              className="bg-red-600 text-white py-2 px-4 rounded-md font-medium hover:bg-red-700"
-            >
-              Logout
-            </button>
-          </div>
-        </div>
-
-        {/* Profile Form - Required for new users */}
-        {showProfileForm && (
-          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-2xl font-bold text-gray-800">
-                {profileRequired ? 'Complete Your Profile' : 'Your Profile'}
-              </h2>
-              {profileRequired && (
-                <span className="bg-yellow-100 text-yellow-800 text-sm font-medium px-3 py-1 rounded-full">
-                  Required
-                </span>
-              )}
-            </div>
-            {profileRequired && (
-              <div className="bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded-md mb-4">
-                <p className="font-medium">Welcome! 👋</p>
-                <p className="text-sm mt-1">
-                  Please fill out your profile to get personalized meal recommendations. 
-                  This information helps us suggest recipes that match your dietary needs and goals.
-                </p>
-              </div>
-            )}
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Weight Goal {profileRequired && <span className="text-red-500">*</span>}
-                </label>
-                <div className="flex gap-4">
-                  {['gain', 'lose', 'maintain'].map((g) => (
-                    <label key={g} className="flex items-center">
-                      <input
-                        type="radio"
-                        value={g}
-                        checked={goals === g}
-                        onChange={(e) => setGoals(e.target.value)}
-                        className="mr-2"
-                        required={profileRequired}
-                      />
-                      {g.charAt(0).toUpperCase() + g.slice(1)} Weight
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Age</label>
-                  <input
-                    type="number"
-                    min={1}
-                    max={120}
-                    value={age}
-                    onChange={(e) => setAge(e.target.value)}
-                    placeholder="e.g. 30"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Sex</label>
-                  <select
-                    value={sex}
-                    onChange={(e) => setSex(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  >
-                    <option value="">Select</option>
-                    <option value="male">Male</option>
-                    <option value="female">Female</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Height (cm)</label>
-                  <input
-                    type="number"
-                    min={1}
-                    value={heightCm}
-                    onChange={(e) => setHeightCm(e.target.value)}
-                    placeholder="e.g. 170"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Weight (kg)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    step={0.1}
-                    value={weightKg}
-                    onChange={(e) => setWeightKg(e.target.value)}
-                    placeholder="e.g. 70"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Activity level</label>
-                <select
-                  value={activityLevel}
-                  onChange={(e) => setActivityLevel(e.target.value)}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                >
-                  <option value="low">Low (sedentary)</option>
-                  <option value="medium">Medium (moderate)</option>
-                  <option value="high">High (very active)</option>
-                </select>
-              </div>
-
-              {(goals === 'lose' || goals === 'gain') && (
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Intensity: {intensityPercent > 0 ? '+' : ''}{intensityPercent}%
-                  </label>
-                  <input
-                    type="range"
-                    min={goals === 'lose' ? -30 : 0}
-                    max={goals === 'gain' ? 20 : 0}
-                    step={5}
-                    value={goals === 'lose'
-                      ? Math.max(-30, Math.min(0, intensityPercent))
-                      : Math.max(0, Math.min(20, intensityPercent))}
-                    onChange={(e) => setIntensityPercent(Number(e.target.value))}
-                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    {goals === 'lose' ? 'Deficit (e.g. −20% ≈ 0.8× TDEE)' : 'Surplus (e.g. +10% ≈ 1.1× TDEE)'}
-                  </p>
-                </div>
-              )}
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Target Calories (optional override)
-                </label>
-                <input
-                  type="number"
-                  value={targetCalories}
-                  onChange={(e) => setTargetCalories(e.target.value)}
-                  placeholder="Leave empty to use calculated target"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Allergies / Dietary Restrictions
-                </label>
-                <input
-                  type="text"
-                  value={allergies}
-                  onChange={(e) => setAllergies(e.target.value)}
-                  placeholder="e.g., nuts, dairy, gluten (comma-separated)"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                />
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Cuisine (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={cuisine}
-                    onChange={(e) => setCuisine(e.target.value)}
-                    placeholder="e.g., Italian, Asian"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Cooking Time (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={cookingTime}
-                    onChange={(e) => setCookingTime(e.target.value)}
-                    placeholder="e.g., under 30 minutes"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Meal Type (optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={mealType}
-                    onChange={(e) => setMealType(e.target.value)}
-                    placeholder="e.g., breakfast, dinner"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                  />
-                </div>
-              </div>
-
-              <button
-                onClick={handleSaveProfile}
-                disabled={profileLoading}
-                className="w-full bg-green-600 text-white py-3 px-4 rounded-md font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {profileLoading 
-                  ? 'Saving...' 
-                  : profileRequired 
-                    ? 'Save Profile & Continue' 
-                    : 'Save Profile'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Daily targets card - above prompt when we have BMR/TDEE data */}
-        {!profileRequired && (targets || targetsLoading) && (
-          <div className="bg-white rounded-lg shadow-lg p-5 mb-6 border-l-4 border-green-500">
-            <h2 className="text-lg font-bold text-gray-800 mb-2">
-              {targetsLoading
-                ? 'Loading targets…'
-                : `Daily targets${targets?.goal ? ` (for ${targets.goal === 'lose' ? 'weight loss' : targets.goal === 'gain' ? 'weight gain' : 'maintenance'})` : ''}`}
-            </h2>
-            {targets && (
-              <>
-                <p className="text-2xl font-bold text-green-700 mb-3">
-                  {targets.calories} kcal/day
-                </p>
-                <div className="space-y-2 mb-3">
-                  <div>
-                    <div className="flex justify-between text-sm mb-0.5">
-                      <span className="font-medium text-blue-800">Protein</span>
-                      <span className="text-blue-700">{targets.protein_g} g</span>
-                    </div>
-                    <div className="h-2 bg-blue-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-blue-500 rounded-full" style={{ width: '100%' }} />
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex justify-between text-sm mb-0.5">
-                      <span className="font-medium text-amber-800">Carbs</span>
-                      <span className="text-amber-700">{targets.carbs_g} g</span>
-                    </div>
-                    <div className="h-2 bg-amber-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-amber-500 rounded-full" style={{ width: '100%' }} />
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex justify-between text-sm mb-0.5">
-                      <span className="font-medium text-purple-800">Fat</span>
-                      <span className="text-purple-700">{targets.fat_g} g</span>
-                    </div>
-                    <div className="h-2 bg-purple-100 rounded-full overflow-hidden">
-                      <div className="h-full bg-purple-500 rounded-full" style={{ width: '100%' }} />
-                    </div>
-                  </div>
-                </div>
-                <p className="text-xs text-gray-500">
-                  Calculated from your age, sex, height, weight, and activity level (BMR → TDEE).
-                </p>
-              </>
-            )}
-          </div>
-        )}
-
-        {!profileRequired && !targets && !targetsLoading && (
-          <p className="text-sm text-gray-500 mb-4">
-            Add <strong>age, sex, height & weight</strong> in your profile to see your daily targets (BMR → TDEE → macros).
-          </p>
-        )}
-
-        {/* Today summary (read-only) */}
-        {!profileRequired && (
-          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-xl font-bold">Today Summary</h2>
-              <div className="flex items-center gap-3">
-                <div className="text-sm text-gray-600">{todayTotals ? `${todayTotals.calories_total || 0} kcal eaten` : 'No intake logged'} • {todayActivity ? `${todayActivity.calories_burned || 0} kcal burned` : 'No activity'}</div>
-                <button onClick={openPhotoFileDialog} className="px-3 py-1 bg-green-600 text-white rounded text-sm" disabled={!isAuthenticated || photoUploading}>{photoUploading ? 'Analyzing…' : 'Log with photo'}</button>
-                <input id="photo-input" ref={imageInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handlePhotoFileChange} />
-              </div>
-            </div>
-            <div className="text-sm text-gray-700">
-              <div>Consumed: {Math.round(todayTotals?.calories_total || 0)} kcal</div>
-              <div>Burned: {Math.round(todayActivity?.calories_burned || 0)} kcal</div>
-              <div className="font-medium">Net: {Math.round((todayTotals?.calories_total || 0) - (todayActivity?.calories_burned || 0))} kcal</div>
-            </div>
-          </div>
-        )}
-
-        {/* Insights Card */}
-        {!profileRequired && (
-          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-xl font-bold">Insights</h2>
-              <div className="flex gap-2 items-center">
-                <button onClick={() => loadInsights(7)} className="px-2 py-1 border rounded text-sm">Last 7d</button>
-                <button onClick={() => loadInsights(30)} className="px-2 py-1 border rounded text-sm">Last 30d</button>
-                <button onClick={() => askCoach(7)} className="px-3 py-1 bg-indigo-600 text-white rounded text-sm" disabled={coachLoading}>{coachLoading ? 'Coaching…' : 'Ask coach about last week'}</button>
-              </div>
-            </div>
-
-            {insightsLoading && <div className="text-sm text-gray-500">Loading insights…</div>}
-
-            {insights && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <div className="text-sm text-gray-700 mb-2">Averages</div>
-                  <div className="text-sm text-gray-800">
-                    <div>Calories: {insights.averages?.avg_calories ?? '-'} kcal</div>
-                    <div>Protein: {insights.averages?.avg_protein ?? '-'} g</div>
-                    <div>Carbs: {insights.averages?.avg_carbs ?? '-'} g</div>
-                    <div>Fat: {insights.averages?.avg_fat ?? '-'} g</div>
-                    <div>Steps: {insights.averages?.avg_steps ?? '-'} steps</div>
-                  </div>
-                </div>
-                <div>
-                  <div className="text-sm text-gray-700 mb-2">Highlights</div>
-                  <div className="space-y-2 text-sm text-gray-800">
-                    {insights.insights && insights.insights.length > 0 ? (
-                      insights.insights.map((s, i) => <div key={i} className="p-2 bg-gray-50 rounded">{s}</div>)
-                    ) : (
-                      <div className="text-gray-500">No highlights yet</div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {coachResult && (
-              <div className="mt-4 p-3 border rounded bg-gray-50">
-                <div className="font-semibold mb-2">Coach Suggestions</div>
-                {coachResult.parsed ? (
-                  <div className="space-y-2 text-sm">
-                    {Array.isArray(coachResult.parsed.observations) && (
-                      <div>
-                        <div className="font-medium">Observations</div>
-                        {coachResult.parsed.observations.map((o, i) => <div key={`o${i}`} className="text-sm">• {o}</div>)}
-                      </div>
-                    )}
-                    {Array.isArray(coachResult.parsed.suggestions) && (
-                      <div>
-                        <div className="font-medium mt-2">Suggestions</div>
-                        {coachResult.parsed.suggestions.map((s, i) => <div key={`s${i}`} className="text-sm">• {s}</div>)}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <pre className="text-xs text-gray-700 whitespace-pre-wrap">{coachResult.raw || coachResult.error || JSON.stringify(coachResult, null, 2)}</pre>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Photo analysis modal (shows after image is analyzed) */}
-        {photoModalVisible && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
-            <div className="bg-white rounded-lg shadow-lg w-11/12 max-w-2xl p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold">Image predictions</h3>
-                <button onClick={() => { setPhotoModalVisible(false); setPhotoCandidates([]); setPhotoPreviewUrl(null); }} className="text-sm text-red-600">Close</button>
-              </div>
-              <div className="flex gap-4">
-                {photoPreviewUrl && (
-                  <div className="w-40 h-40 bg-gray-100 rounded overflow-hidden flex-shrink-0">
-                    <img src={photoPreviewUrl} alt="preview" className="w-full h-full object-cover" />
-                  </div>
-                )}
-                <div className="flex-1">
-                  <div className="text-sm text-gray-600 mb-2">Select the closest match and edit values if needed before saving.</div>
-                  <div className="space-y-2 max-h-64 overflow-auto">
-                    {photoCandidates.length === 0 && <div className="text-sm text-gray-500">No candidates found.</div>}
-                    {photoCandidates.map((c, idx) => (
-                      <div key={`pc-${idx}`} className={`p-2 border rounded ${selectedCandidate === idx ? 'bg-gray-50' : ''}`}>
-                        <div className="flex items-start justify-between">
-                          <div>
-                            <div className="font-medium">{c.label} <span className="text-xs text-gray-500">({Math.round((c.confidence||0)*100)}%)</span></div>
-                            <div className="text-xs text-gray-600">Portion: {c.portion_text || '—'}</div>
-                          </div>
-                          <div className="text-sm text-gray-700">{Math.round(c.calories||0)} kcal</div>
-                        </div>
-                          <div className="mt-2 flex gap-2">
-                          <button onClick={() => setSelectedCandidate(idx)} className="px-2 py-1 border rounded text-xs">Select</button>
-                          <button onClick={() => saveCandidateToDate(c)} className="px-2 py-1 bg-green-600 text-white rounded text-xs">Save</button>
-                          <button onClick={() => searchRecipes(c.label)} className="px-2 py-1 border rounded text-xs">Search recipes</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                  {recipeLoading && <div className="mt-3 text-sm text-gray-600">Searching recipes…</div>}
-                  {recipeResults && recipeResults.length > 0 && (
-                    <div className="mt-3">
-                      <div className="font-medium">Recipe results</div>
-                      <div className="space-y-4 max-h-96 overflow-auto mt-2">
-                        <div className="grid grid-cols-1 gap-4">
-                          {recipeResults.map((r, i) => (
-                            <RecipeCard key={`r-${i}`} recipe={r} onRegenerate={() => { /* noop */ }} />
-                          ))}
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Meal Planning Form - Only show if profile is complete */}
-
-        {!profileRequired && (
-          <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-            <h2 className="text-2xl font-bold mb-4 text-gray-800">Get Meal Plan</h2>
-            <p className="text-gray-600 mb-4">
-              Your saved preferences will be used automatically. You can add a special request below.
-            </p>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Special Request (optional)
-                </label>
-                <textarea
-                  value={userRequest}
-                  onChange={(e) => setUserRequest(e.target.value)}
-                  placeholder="e.g., 'high-protein dinner under 600 kcal' or 'vegetarian meal prep ideas'"
-                  rows={3}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-green-500"
-                />
-              </div>
-              <div className="flex gap-2 items-center">
-                <button
-                  type="submit"
-                  disabled={loading}
-                  className="flex-1 bg-green-600 text-white py-3 px-4 rounded-md font-medium hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {loading ? 'Searching for recipes...' : 'Get Meal Plan'}
-                </button>
-                <input
-                  type="file"
-                  accept="image/*"
-                  id="photo-to-recipe-input"
-                  style={{ display: 'none' }}
-                  onChange={handlePhotoToRecipe}
-                />
-                <button
-                  type="button"
-                  className="flex items-center gap-1 bg-blue-600 text-white py-3 px-4 rounded-md font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  onClick={() => document.getElementById('photo-to-recipe-input').click()}
-                  disabled={loading}
-                >
-                  <span role="img" aria-label="camera">📷</span> Photo to Recipe
-                </button>
-              </div>
-
-            </form>
-          </div>
-        )}
-
-        {/* Error Display */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-md mb-6">
-            <strong>Error:</strong> {error}
-          </div>
-        )}
-
-        {/* Response Display */}
-        {response && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold text-gray-800">Recipe Suggestions</h2>
-              {response.metadata && (
-                <div className="text-xs text-gray-500">
-                  Model: {response.metadata.model}
-                </div>
-              )}
-            </div>
-            
-            {Array.isArray(response.recipes) && response.recipes.length > 0 ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                {response.recipes.map((recipe, index) => (
-                  <RecipeCard 
-                    key={index} 
-                    recipe={recipe}
-                    onRegenerate={() => handleSubmit({ preventDefault: () => {} })}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="bg-yellow-50 border border-yellow-200 text-yellow-700 px-4 py-3 rounded-md">
-                No recipes found. Please try again with different preferences.
-              </div>
-            )}
-          </div>
-        )}
-
-
-      {/* Calendar popup */}
-      {showCalendarPopup && (
-        <div ref={popupRef} className="absolute right-0 mt-12 w-96 z-50 bg-white border rounded-lg shadow-lg p-4" style={{ minWidth: 360 }}>
-          {recipeLoading && <div className="mt-3 text-sm text-gray-600">Searching recipes…</div>}
-          {recipeResults && recipeResults.length > 0 && (
-            <div className="mt-3">
-              <div className="font-medium">Recipe results</div>
-              <div className="space-y-2 max-h-48 overflow-auto mt-2">
-                {recipeResults.map((r, i) => (
-                  <div key={`r-${i}`} className="p-2 border rounded">
-                    <a href={r.url} target="_blank" rel="noreferrer" className="font-medium text-sm text-blue-600">{r.title}</a>
-                    <div className="text-xs text-gray-600">{r.source || ''}</div>
-                    <div className="text-sm text-gray-700 mt-1">{r.summary}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-          {/* Top: month controls */}
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  const prev = new Date(calendarMonth + '-01');
-                  prev.setMonth(prev.getMonth() - 1);
-                  setCalendarMonth(prev.toISOString().slice(0,7));
-                  loadCalendar(prev.toISOString().slice(0,7));
-                }}
-                className="px-2 py-1 border rounded"
-              >◀</button>
-              <div className="px-3 py-1 bg-gray-50 rounded text-sm">{calendarMonth}</div>
-              <button
-                onClick={() => {
-                  const next = new Date(calendarMonth + '-01');
-                  next.setMonth(next.getMonth() + 1);
-                  setCalendarMonth(next.toISOString().slice(0,7));
-                  loadCalendar(next.toISOString().slice(0,7));
-                }}
-                className="px-2 py-1 border rounded"
-              >▶</button>
-            </div>
-            <button onClick={() => setShowCalendarPopup(false)} className="text-sm text-red-600">✕</button>
-          </div>
-
-          {/* Mini month grid */}
-          <div className="grid grid-cols-7 gap-1 text-xs mb-3">
-            {['S','M','T','W','T','F','S'].map((d, idx) => (
-              <div key={`dow-${idx}`} className="text-center font-medium text-gray-500">{d}</div>
-            ))}
-            {(() => {
-              const [y, m] = calendarMonth.split('-').map(Number);
-              const year = y, monthIndex = m - 1;
-              const firstDay = new Date(year, monthIndex, 1);
-              const startDay = firstDay.getDay();
-              const totalDays = new Date(year, monthIndex + 1, 0).getDate();
-              const cells = [];
-              for (let i = 0; i < startDay; i++) cells.push(<div key={`e-${i}`} />);
-              for (let d = 1; d <= totalDays; d++) {
-                const dateStr = `${calendarMonth}-${String(d).padStart(2,'0')}`;
-                const hasData = calendarTotals.some(ct => ct.date === dateStr);
-                const isSelected = selectedDate === dateStr;
-                cells.push(
-                  <button
-                    key={dateStr}
-                    onClick={() => {
-                      selectDay(dateStr);
-                      setShowCalendarPopup(true);
-                    }}
-                    className={`h-8 w-8 rounded text-sm flex items-center justify-center ${
-                      isSelected ? 'bg-blue-700 text-white' : hasData ? 'bg-blue-100 text-blue-800' : 'hover:bg-gray-100'
-                    }`}
-                    title={hasData ? `Has data: ${dateStr}` : dateStr}
-                  >
-                    {d}
-                  </button>
-                );
-              }
-              // pad to complete grid (optional)
-              while (cells.length % 7 !== 0) cells.push(<div key={`pad-${cells.length}`} />);
-              return cells;
-            })()}
-          </div>
-
-          {/* Right: day detail */}
-          <div className="border-t pt-3">
-            <div className="flex items-center justify-between mb-2">
-              <div className="font-medium text-sm">{selectedDate ? `Entries for ${selectedDate}` : 'Select a date'}</div>
-              <div className="text-xs text-gray-500">
-                {selectedDayItems.length > 0 ? `${selectedDayItems.reduce((s,i)=> s + (i.calories||0), 0)} kcal` : ''}
-              </div>
-            </div>
-
-            {!selectedDate && <div className="text-xs text-gray-500 mb-2">Click a date to view/edit entries.</div>}
-
-            {selectedDate && (
-              <div className="space-y-2 max-h-48 overflow-auto">
-                {selectedDayItems.length === 0 && <div className="text-xs text-gray-500">No items logged</div>}
-                {selectedDayItems.map(item => (
-                  <div key={item.id} className="flex items-start justify-between p-2 border rounded">
-                    <div className="flex-1">
-                      {editingId === item.id ? (
-                        <div className="space-y-2">
-                          <input className="w-full border px-2 py-1 text-sm" value={editFields.item_name} onChange={(e) => setEditFields({...editFields, item_name: e.target.value})} />
-                          <div className="grid grid-cols-4 gap-1 mt-1">
-                            <input className="border px-1 py-1 text-xs" value={editFields.calories} onChange={(e) => setEditFields({...editFields, calories: e.target.value})} placeholder="kcal" />
-                            <input className="border px-1 py-1 text-xs" value={editFields.protein_g} onChange={(e) => setEditFields({...editFields, protein_g: e.target.value})} placeholder="protein" />
-                            <input className="border px-1 py-1 text-xs" value={editFields.carbs_g} onChange={(e) => setEditFields({...editFields, carbs_g: e.target.value})} placeholder="carbs" />
-                            <input className="border px-1 py-1 text-xs" value={editFields.fat_g} onChange={(e) => setEditFields({...editFields, fat_g: e.target.value})} placeholder="fat" />
-                          </div>
-                        </div>
-                      ) : (
-                        <div>
-                          <div className="font-medium text-sm">{item.item_name}</div>
-                          <div className="text-xs text-gray-600">{Math.round(item.calories || 0)} kcal • {item.servings || 1} srv</div>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="ml-2 flex flex-col gap-1">
-                      {editingId === item.id ? (
-                        <>
-                          <button onClick={() => saveEdit(item.id)} className="px-2 py-1 bg-green-600 text-white rounded text-xs">Save</button>
-                          <button onClick={() => setEditingId(null)} className="px-2 py-1 border rounded text-xs">Cancel</button>
-                        </>
-                      ) : (
-                        <>
-                          <button onClick={() => startEdit(item)} className="px-2 py-1 bg-blue-500 text-white rounded text-xs">Edit</button>
-                          <button onClick={() => removeItem(item.id)} className="px-2 py-1 bg-red-600 text-white rounded text-xs">Delete</button>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Quick add: saved foods */}
-            {selectedDate && (
-              <>
-                <div className="mt-3 text-xs font-medium">Add saved food</div>
-                <div className="flex gap-2 mt-1 overflow-x-auto">
-                  {savedLoading && <div className="text-xs text-gray-500">Loading…</div>}
-                  {savedFoods.slice(0,6).map(s => (
-                    <div key={s.id} className="px-2 py-1 border rounded flex items-center gap-2 text-xs">
-                      <div>
-                        <div className="font-medium">{s.name}</div>
-                        <div className="text-gray-500">{Math.round(s.calories || 0)} kcal</div>
-                      </div>
-                      <button onClick={() => addSavedToDate(s, selectedDate)} className="ml-2 bg-blue-600 text-white px-2 py-1 rounded text-xs">Add</button>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Manual add small form */}
-                <div className="mt-3 border-t pt-3">
-                  <div className="text-xs font-medium mb-1">Add manual entry</div>
-                  <div className="flex gap-2">
-                    <input value={manualPopupName} onChange={(e)=>setManualPopupName(e.target.value)} placeholder="name" className="flex-1 border px-2 py-1 text-xs" />
-                    <input value={manualPopupCalories} onChange={(e)=>setManualPopupCalories(e.target.value)} placeholder="kcal" className="w-20 border px-2 py-1 text-xs" />
-                    <button
-                      onClick={async () => {
-                        if (!manualPopupName || manualPopupCalories === '') return alert('name and calories required');
-                        try {
-                          const body = {
-                            date: selectedDate || new Date().toISOString().slice(0,10),
-                            item_name: manualPopupName,
-                            calories: Number(manualPopupCalories),
-                            servings: 1,
-                            source_type: 'manual'
-                          };
-                          const res = await fetch(`${API_BASE}/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
-                          const text = await res.text();
-                          if (!text) throw new Error('Empty response');
-                          const data = JSON.parse(text);
-                          if (!res.ok) throw new Error(data.error || 'Failed');
-                          setManualPopupName(''); setManualPopupCalories('');
-                          await selectDay(selectedDate);
-                          window.dispatchEvent(new Event('logUpdated'));
-                        } catch (err) {
-                          alert('Add failed: ' + (err instanceof Error ? err.message : 'unknown'));
-                        }
-                      }}
-                      className="bg-green-600 text-white px-2 py-1 rounded text-xs"
-                    >
-                      Add
-                    </button>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-  </div>
-</div>
-  );
-}
-
-// Recipe Card Component
-function RecipeCard({ recipe, onRegenerate }) {
-  const [showNutrition, setShowNutrition] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const nutrients = recipe.nutrients || {};
-  // Add to log handler
-  const addToLog = async () => {
-    try {
-      const servingsInput = window.prompt('Servings to add (number):', '1');
-      if (!servingsInput) return;
-      const servings = Number(servingsInput) || 1;
-      const body = {
-        date: new Date().toISOString().slice(0,10),
-        item_name: recipe.title || 'Recipe',
-        calories: (nutrients.calories != null ? Number(nutrients.calories) : 0) * servings,
-        protein_g: nutrients.protein_g != null ? Number(nutrients.protein_g) * servings : undefined,
-        carbs_g: nutrients.carbs_g != null ? Number(nutrients.carbs_g) * servings : undefined,
-        fat_g: nutrients.fat_g != null ? Number(nutrients.fat_g) * servings : undefined,
-        servings: servings,
-        source_type: 'generated_recipe'
-      };
-
-      const res = await fetch(`${API_BASE}/me/intake`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) });
-      const text = await res.text();
-      if (!text) throw new Error('No response');
-      const data = JSON.parse(text);
-      if (!res.ok) throw new Error(data.error || 'Failed to add to log');
-
-      // notify app to reload today's totals
-      window.dispatchEvent(new Event('logUpdated'));
-      alert('Added to daily log');
-    } catch (err) {
-      console.error('Add to log failed', err);
-      alert('Failed to add to log: ' + (err instanceof Error ? err.message : 'unknown'));
-    }
-  };
-
-  const copyIngredients = () => {
-    if (!recipe.ingredients || !Array.isArray(recipe.ingredients)) return;
-    
-    const ingredientsText = recipe.ingredients
-      .map(ing => {
-        if (typeof ing === 'string') return ing;
-        return `${ing.amount || ''} ${ing.unit || ''} ${ing.name || ''}`.trim();
-      })
-      .join('\n');
-    
-    navigator.clipboard.writeText(ingredientsText);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const allergyWarnings = recipe.allergy_warnings || [];
-
-  return (
-    <div className="bg-white rounded-lg shadow-lg overflow-hidden hover:shadow-xl transition-shadow">
-      {/* Hero Image */}
-      {recipe.image_url && (
-        <div className="w-full h-48 bg-gray-200 overflow-hidden">
-          <img 
-            src={recipe.image_url} 
-            alt={recipe.title || 'Recipe'}
-            className="w-full h-full object-cover"
-            onError={(e) => {
-              e.target.style.display = 'none';
-              e.target.parentElement.classList.add('bg-gradient-to-br', 'from-green-100', 'to-blue-100');
-            }}
-          />
-        </div>
-      )}
-      
-      {/* Card Content */}
-      <div className="p-6">
-        {/* Title and Source */}
-        <div className="mb-4">
-          <h3 className="text-xl font-bold text-gray-800 mb-2">
-            {recipe.title || 'Untitled Recipe'}
-          </h3>
-          {recipe.source_url && (
-            <a 
-              href={recipe.source_url} 
-              target="_blank" 
-              rel="noopener noreferrer"
-              className="text-sm text-blue-600 hover:text-blue-800 underline"
-            >
-              View Original Recipe →
+      <div className="min-h-[100dvh]">
+        <Ambient />
+        <main className="mx-auto grid min-h-[100dvh] max-w-6xl items-center gap-10 px-4 py-10 sm:px-6 lg:grid-cols-[1.15fr_0.85fr] lg:gap-16">
+          <section className="rise space-y-10">
+            <a href="/" onClick={(e) => { e.preventDefault(); navigate('/'); }} className="inline-flex rounded-xl" aria-label="Healthy Diet Tracker home">
+              <Brand />
             </a>
-          )}
-        </div>
+            <div className="space-y-5">
+              <h1 className="max-w-xl text-balance text-4xl font-semibold leading-[1.05] tracking-tight sm:text-5xl lg:text-6xl">
+                Know your numbers, then eat to them.
+              </h1>
+              <p className="max-w-[46ch] text-lg leading-relaxed text-ink-2">
+                Log meals by photo or by hand, track them against your daily targets, and get meals planned to fit.
+              </p>
+            </div>
 
-        {/* Allergy Warnings */}
-        {allergyWarnings.length > 0 && (
-          <div className="mb-4 flex flex-wrap gap-2">
-            {allergyWarnings.map((warning, idx) => (
-              <span 
-                key={idx}
-                className="bg-red-100 text-red-800 text-xs font-medium px-2.5 py-1 rounded-full"
-              >
-                ⚠️ {warning}
-              </span>
-            ))}
-          </div>
+            {/* Live component preview with example values (not a screenshot). */}
+            <div className="rise panel hidden max-w-xl items-center gap-8 p-6 lg:flex" style={{ '--i': 2 }} aria-hidden="true">
+              <div className="w-40 shrink-0">
+                <Ring value={1460} max={2150} label="">
+                  <div>
+                    <div className="num text-3xl font-semibold tracking-tight">690</div>
+                    <div className="text-xs text-ink-2">kcal left</div>
+                  </div>
+                </Ring>
+              </div>
+              <div className="flex-1 space-y-4">
+                <p className="text-sm text-ink-2">Example day</p>
+                <MacroMeter label="Protein" dot="bg-protein" value={96} target={140} />
+                <MacroMeter label="Carbs" dot="bg-carbs" value={162} target={240} />
+                <MacroMeter label="Fat" dot="bg-fat" value={41} target={70} />
+              </div>
+            </div>
+          </section>
+
+          <section className="rise panel p-6 sm:p-8" style={{ '--i': 1 }} aria-label={showLogin ? 'Sign in' : 'Create account'}>
+            <div className="mb-8 grid grid-cols-2 rounded-full bg-surface-2 p-1">
+              {[['Sign in', true], ['Create account', false]].map(([label, isLogin]) => (
+                <button
+                  key={label}
+                  type="button"
+                  aria-pressed={showLogin === isLogin}
+                  onClick={() => { setShowLogin(isLogin); setAuthError(null); }}
+                  className={`h-10 rounded-full text-sm font-medium transition ${showLogin === isLogin ? 'bg-surface text-ink shadow-sm' : 'text-ink-2 hover:text-ink'}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <form onSubmit={handleAuth} className="space-y-5">
+              <div>
+                <label htmlFor="a-email" className="label">Email</label>
+                <input id="a-email" autoFocus={route === '/signin'} name="email" type="email" autoComplete="email" spellCheck={false} required value={email} onChange={(e) => setEmail(e.target.value)} className="field" placeholder="you@example.com" />
+              </div>
+              <div>
+                <label htmlFor="a-password" className="label">Password</label>
+                <input
+                  id="a-password"
+                  name="password"
+                  type="password"
+                  autoComplete={showLogin ? 'current-password' : 'new-password'}
+                  required
+                  minLength={showLogin ? undefined : 8}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="field"
+                />
+                {!showLogin && <p className="mt-1.5 text-xs text-ink-2">At least 8 characters.</p>}
+              </div>
+              {!showLogin && (
+                <div>
+                  <label htmlFor="a-confirm" className="label">Confirm password</label>
+                  <input id="a-confirm" type="password" autoComplete="new-password" required minLength={8} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="field" />
+                </div>
+              )}
+              {authError && (
+                <p role="alert" className="flex items-start gap-2 rounded-xl bg-danger/10 px-3.5 py-3 text-sm text-danger">
+                  <WarningCircleIcon size={18} className="mt-px shrink-0" />{authError}
+                </p>
+              )}
+              <button type="submit" disabled={authLoading} className="btn-primary w-full">
+                {authLoading ? (showLogin ? 'Signing in…' : 'Creating account…') : (showLogin ? 'Sign in' : 'Create account')}
+              </button>
+            </form>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  const onboarding = profileRequired || keyStep === 'active';
+
+  const navLink = (to, Icon, children) => {
+    const active = to === '/' ? !onCalendar : onCalendar;
+    return (
+      <a
+        href={to}
+        onClick={(e) => { e.preventDefault(); navigate(to); }}
+        aria-current={active ? 'page' : undefined}
+        className={`flex h-9 items-center gap-2 rounded-full px-3.5 text-sm font-medium transition sm:px-4 ${active ? 'bg-surface text-ink shadow-sm' : 'text-ink-2 hover:text-ink'}`}
+      >
+        <Icon size={18} weight={active ? 'fill' : 'regular'} aria-hidden="true" />{children}
+      </a>
+    );
+  };
+
+  const nav = (
+    <header className="sticky top-0 z-30 border-b border-line/60 bg-bg/70 backdrop-blur-xl">
+      <div className="mx-auto flex h-16 max-w-6xl items-center gap-3 px-4 sm:px-6">
+        <Brand compact />
+        {!onboarding && (
+          <nav className="ml-auto flex items-center rounded-full bg-surface-2/80 p-1" aria-label="Primary">
+            {navLink('/', HouseIcon, 'Today')}
+            {navLink('/calendar', CalendarBlankIcon, 'History')}
+          </nav>
         )}
-
-        {/* Nutrition Badges */}
-        <div className="mb-4 flex flex-wrap gap-2">
-          {nutrients.calories && (
-            <span className="bg-green-100 text-green-800 text-xs font-medium px-2.5 py-1 rounded-full">
-              🔥 {nutrients.calories} cal
-            </span>
+        <div className={`flex items-center ${onboarding ? 'ml-auto' : ''}`}>
+          {!onboarding && (
+            <button type="button" className="icon-btn" aria-label="Profile and targets" title="Profile and targets" onClick={() => setShowProfileForm(true)}>
+              <SlidersHorizontalIcon size={20} />
+            </button>
           )}
-          {nutrients.protein_g && (
-            <span className="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-1 rounded-full">
-              💪 {nutrients.protein_g}g protein
-            </span>
-          )}
-          {nutrients.carbs_g && (
-            <span className="bg-yellow-100 text-yellow-800 text-xs font-medium px-2.5 py-1 rounded-full">
-              🍞 {nutrients.carbs_g}g carbs
-            </span>
-          )}
-          {nutrients.fat_g && (
-            <span className="bg-purple-100 text-purple-800 text-xs font-medium px-2.5 py-1 rounded-full">
-              🥑 {nutrients.fat_g}g fat
-            </span>
-          )}
+          <button type="button" className="icon-btn" aria-label="Sign out" title="Sign out" onClick={handleLogout}>
+            <SignOutIcon size={20} />
+          </button>
         </div>
+      </div>
+    </header>
+  );
 
-        {recipe.daily_contribution && (
-          <p className="text-sm text-gray-600 italic mb-4">{recipe.daily_contribution}</p>
-        )}
+  const shell = (content) => (
+    <div className="min-h-[100dvh]">
+      <Ambient />
+      {nav}
+      {content}
+      <input ref={imageInputRef} type="file" accept="image/*" className="hidden" onChange={handlePhotoFileChange} />
 
-        {/* Ingredients Section */}
-        {recipe.ingredients && Array.isArray(recipe.ingredients) && recipe.ingredients.length > 0 && (
-          <div className="mb-4">
-            <div className="flex items-center justify-between mb-2">
-              <h4 className="font-semibold text-gray-700">Ingredients</h4>
-              <button
-                onClick={copyIngredients}
-                className="text-xs text-blue-600 hover:text-blue-800 font-medium"
-              >
-                {copied ? '✓ Copied!' : '📋 Copy'}
+      <Sheet side open={showProfileForm && !onboarding} onClose={closeProfile} title="Profile and targets">
+        {keySection}
+        <div className="mt-8 border-t border-line pt-8">
+          {profileError && !profile ? (
+            <div role="alert" className="space-y-4">
+              <p className="flex items-start gap-2 text-sm text-danger">
+                <WarningCircleIcon size={16} className="mt-0.5 shrink-0" />Couldn’t load your profile, so it can’t be edited right now.
+              </p>
+              <button type="button" className="btn-ghost h-10 px-4 text-sm" onClick={loadProfile} disabled={profileLoading}>
+                {profileLoading ? 'Loading…' : 'Try again'}
               </button>
             </div>
-            <ul className="list-disc list-inside space-y-1 text-sm text-gray-600">
-              {recipe.ingredients.map((ing, idx) => (
-                <li key={idx}>
-                  {typeof ing === 'string' 
-                    
-                    ? ing 
-                    : `${ing.amount || ''} ${ing.unit || ''} ${ing.name || ''}`.trim()}
+          ) : profileForm}
+        </div>
+      </Sheet>
+
+      <Sheet open={photoModalVisible} onClose={closePhoto} title="What’s on the plate">
+        <div className="grid gap-6 sm:grid-cols-[11rem_1fr]">
+          {photoPreviewUrl && <img src={photoPreviewUrl} alt="Your photo" className="aspect-square w-full rounded-2xl object-cover" />}
+          <div>
+            <p className="text-[15px] text-ink-2">Pick the closest match to log it, or look up recipes for it.</p>
+            <ul className="mt-4 space-y-2">
+              {photoCandidates.length === 0 && (
+                <li className="rounded-2xl bg-surface-2/60 p-4 text-[15px] text-ink-2">Nothing recognized in this photo. Try another angle, or add it by hand.</li>
+              )}
+              {photoCandidates.map((c, i) => (
+                <li key={`pc-${i}`} className="rounded-2xl border border-line p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-medium">{c.label}</p>
+                      <p className="text-sm text-ink-2">
+                        {[c.portion_text, `${Math.round((c.confidence || 0) * 100)}% match`].filter(Boolean).join(', ')}
+                      </p>
+                    </div>
+                    <p className="num shrink-0 font-semibold">{fmt(c.calories)} <span className="text-sm font-normal text-ink-2">kcal</span></p>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button type="button" className="btn-primary h-10 px-4 text-sm" onClick={() => saveCandidateToDate(c)}>
+                      <PlusIcon size={16} weight="bold" />Log it
+                    </button>
+                    <button type="button" className="btn-ghost h-10 px-4 text-sm" onClick={() => searchRecipes(c.label)} disabled={recipeLoading}>
+                      Find recipes
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
           </div>
-        )}
-
-        {/* Steps Section */}
-        {recipe.steps && Array.isArray(recipe.steps) && recipe.steps.length > 0 && (
-          <div className="mb-4">
-            <h4 className="font-semibold text-gray-700 mb-2">Instructions</h4>
-            <ol className="list-decimal list-inside space-y-2 text-sm text-gray-600">
-              {recipe.steps.map((step, idx) => (
-                <li key={idx} className="pl-2">{step}</li>
-              ))}
-            </ol>
+        </div>
+        {recipeLoading && <div className="mt-8"><RecipeSkeleton /></div>}
+        {recipeResults.length > 0 && (
+          <div className="mt-8 space-y-4">
+            <h3 className="font-semibold">Recipes</h3>
+            {recipeResults.map((r, i) => (
+              <RecipeCard key={`r-${i}`} recipe={r} style={{ '--i': i }} onAddToLog={addRecipeToLog} />
+            ))}
           </div>
         )}
+      </Sheet>
 
-        {/* Nutrition Details Toggle */}
-        {(nutrients.calories || nutrients.protein_g || nutrients.carbs_g || nutrients.fat_g) && (
-          <div className="mb-4">
-            <button
-              onClick={() => setShowNutrition(!showNutrition)}
-              className="text-sm text-gray-600 hover:text-gray-800 font-medium"
-            >
-              {showNutrition ? '▼ Hide' : '▶ Show'} Nutrition Details
-            </button>
-            {showNutrition && (
-              <div className="mt-2 p-3 bg-gray-50 rounded-md text-sm">
-                <div className="grid grid-cols-2 gap-2">
-                  {nutrients.calories && (
-                    <div>
-                      <span className="font-medium">Calories:</span> {nutrients.calories}
-                    </div>
-                  )}
-                  {nutrients.protein_g && (
-                    <div>
-                      <span className="font-medium">Protein:</span> {nutrients.protein_g}g
-                    </div>
-                  )}
-                  {nutrients.carbs_g && (
-                    <div>
-                      <span className="font-medium">Carbs:</span> {nutrients.carbs_g}g
-                    </div>
-                  )}
-                  {nutrients.fat_g && (
-                    <div>
-                      <span className="font-medium">Fat:</span> {nutrients.fat_g}g
-                    </div>
-                  )}
-                </div>
+      <Toast toast={toast} />
+    </div>
+  );
+
+  // Onboarding step 1: connect an AI provider key (skippable for this session)
+  if (keyStep === 'active') {
+    return shell(
+      <main className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-14">
+        <div className="rise">
+          {profileRequired && <p className="mb-3 text-sm font-medium text-ink-2">Step 1 of 2</p>}
+          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Connect your AI key</h1>
+          <p className="mt-3 max-w-[60ch] text-[15px] leading-relaxed text-ink-2">
+            Photo logging, meal plans and the coach run on your own AI account, so you stay in control of usage and cost.
+            Paste a key from OpenAI, Anthropic, Google Gemini, OpenRouter or another supported provider.
+          </p>
+        </div>
+        <div className="rise panel mt-8 space-y-6 p-6 sm:p-8" style={{ '--i': 1 }}>
+          {keyForm('ko', (
+            <button type="button" className="btn-quiet" onClick={() => { resetKeyForm(); setKeyStep('done'); }}>Skip for now</button>
+          ))}
+          {securityNote}
+        </div>
+      </main>
+    );
+  }
+
+  // Onboarding: profile is required before anything else
+  if (profileRequired) {
+    return shell(
+      <main className="mx-auto max-w-2xl px-4 py-10 sm:px-6 sm:py-14">
+        <div className="rise">
+          {keyStep && <p className="mb-3 text-sm font-medium text-ink-2">Step 2 of 2</p>}
+          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Set up your profile</h1>
+          <p className="mt-3 max-w-[60ch] text-[15px] leading-relaxed text-ink-2">
+            Your goal and body stats set your daily calorie and macro targets. Allergies and preferences shape the meals we suggest.
+          </p>
+        </div>
+        <div className="rise panel mt-8 p-6 sm:p-8" style={{ '--i': 1 }}>{profileForm}</div>
+      </main>
+    );
+  }
+
+  // History
+  if (onCalendar) {
+    const [cy, cm] = calendarMonth.split('-').map(Number);
+    const lead = new Date(cy, cm - 1, 1).getDay();
+    const daysIn = new Date(cy, cm, 0).getDate();
+    const byDate = Object.fromEntries(calendarTotals.map((t) => [String(t.date).slice(0, 10), Number(t.calories_total || 0)]));
+    const logged = Object.values(byDate);
+    const monthAvg = logged.length ? logged.reduce((a, b) => a + b, 0) / logged.length : 0;
+    const scale = targets?.calories || Math.max(...logged, 1);
+    const today = todayISO();
+    const dayTotal = selectedDayItems.reduce((s, i) => s + (Number(i.calories) || 0), 0);
+    const shade = (kcal) => 0.18 + 0.6 * Math.min(kcal / scale, 1);
+
+    return shell(
+      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+        <div className="rise flex flex-wrap items-center justify-between gap-4">
+          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">History</h1>
+          <div className="flex items-center gap-1 rounded-full border border-line bg-surface/70 p-0.5 backdrop-blur">
+            <button type="button" className="icon-btn" aria-label="Previous month" onClick={() => setCalendarMonth((m) => shiftMonth(m, -1))}><CaretLeftIcon size={18} /></button>
+            <span className="min-w-[9.5rem] text-center text-sm font-medium" aria-live="polite">{monthLabel(calendarMonth)}</span>
+            <button type="button" className="icon-btn" aria-label="Next month" onClick={() => setCalendarMonth((m) => shiftMonth(m, 1))}><CaretRightIcon size={18} /></button>
+          </div>
+        </div>
+
+        <div className="mt-6 grid items-start gap-5 lg:grid-cols-12">
+          <section className="rise panel p-4 sm:p-6 lg:col-span-7" style={{ '--i': 1 }} aria-label={`Calendar for ${monthLabel(calendarMonth)}`}>
+            <div className="grid grid-cols-7 gap-1.5 pb-2 text-center text-xs font-medium text-ink-2" aria-hidden="true">
+              {WEEKDAYS.map((d) => <div key={d}>{d}</div>)}
+            </div>
+            <div className="grid grid-cols-7 gap-1.5">
+              {Array.from({ length: lead }, (_, i) => <div key={`b${i}`} />)}
+              {Array.from({ length: daysIn }, (_, i) => {
+                const iso = `${calendarMonth}-${String(i + 1).padStart(2, '0')}`;
+                const kcal = byDate[iso];
+                const has = kcal != null;
+                const alpha = has ? shade(kcal) : 0;
+                const selected = selectedDate === iso;
+                return (
+                  <button
+                    key={iso}
+                    type="button"
+                    onClick={() => selectDay(iso)}
+                    aria-pressed={selected}
+                    aria-label={`${longDay(iso)}, ${has ? `${fmt(kcal)} kcal` : 'nothing logged'}`}
+                    className={`relative flex aspect-square flex-col items-center justify-center rounded-xl text-sm transition hover:ring-1 hover:ring-ink-2/40
+                      ${selected ? 'ring-2 ring-accent ring-offset-2 ring-offset-surface' : ''}
+                      ${iso === today ? 'font-bold' : ''} ${alpha > 0.55 ? 'text-on-tint' : 'text-ink'}`}
+                    style={has ? { background: `rgb(var(--accent) / ${alpha})` } : undefined}
+                  >
+                    <span className="num">{i + 1}</span>
+                    {has && <span className="num hidden text-[11px] font-medium opacity-80 sm:block">{fmt(kcal)}</span>}
+                    {iso === today && !selected && <span className="absolute inset-1 rounded-lg border border-ink-2/40" aria-hidden="true" />}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-line pt-5 text-sm text-ink-2">
+              <p>
+                <span className="num font-semibold text-ink">{logged.length}</span> {logged.length === 1 ? 'day' : 'days'} logged
+                {logged.length > 0 && <>, averaging <span className="num font-semibold text-ink">{fmt(monthAvg)}</span> kcal</>}
+              </p>
+              <div className="flex items-center gap-1.5" aria-hidden="true">
+                <span className="mr-1">Less</span>
+                {[0.18, 0.38, 0.58, 0.78].map((a) => <span key={a} className="size-4 rounded" style={{ background: `rgb(var(--accent) / ${a})` }} />)}
+                <span className="ml-1">{targets?.calories ? 'At target' : 'More'}</span>
               </div>
+            </div>
+          </section>
+
+          <section className="rise panel p-6 lg:col-span-5" style={{ '--i': 2 }} aria-labelledby="day-h">
+            {!selectedDate ? (
+              <div className="py-10 text-center text-ink-2">
+                <CalendarBlankIcon size={32} className="mx-auto text-accent" aria-hidden="true" />
+                <p className="mt-3">Pick a day to see and edit what you logged.</p>
+              </div>
+            ) : (
+              <>
+                <div className="flex items-baseline justify-between gap-3">
+                  <h2 id="day-h" className="text-xl font-semibold tracking-tight">{longDay(selectedDate)}</h2>
+                  <span className="num shrink-0 text-sm text-ink-2"><span className="font-semibold text-ink">{fmt(dayTotal)}</span> kcal</span>
+                </div>
+
+                <ul className="mt-5 space-y-2">
+                  {selectedDayItems.length === 0 && (
+                    <li className="rounded-2xl bg-surface-2/60 px-4 py-6 text-center text-[15px] text-ink-2">Nothing logged on this day yet.</li>
+                  )}
+                  {selectedDayItems.map((item) => (
+                    <li key={item.id} className="rounded-2xl bg-surface-2/60 p-3 pl-4">
+                      {editingId === item.id ? (
+                        <form onSubmit={(e) => { e.preventDefault(); saveEdit(item.id); }} className="space-y-3 py-1 pr-1">
+                          <div>
+                            <label htmlFor={`e-name-${item.id}`} className="label">Food</label>
+                            <input id={`e-name-${item.id}`} required className="field" value={editFields.item_name} onChange={setE('item_name')} />
+                          </div>
+                          <div className="grid grid-cols-4 gap-2">
+                            {[['calories', 'kcal'], ['protein_g', 'Protein'], ['carbs_g', 'Carbs'], ['fat_g', 'Fat']].map(([k, l]) => (
+                              <div key={k}>
+                                <label htmlFor={`e-${k}-${item.id}`} className="label text-xs">{l}</label>
+                                <input id={`e-${k}-${item.id}`} type="number" min={0} step="any" inputMode="decimal" className="field num px-2.5" value={editFields[k]} onChange={setE(k)} required={k === 'calories'} />
+                              </div>
+                            ))}
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <button type="button" className="btn-quiet" onClick={() => setEditingId(null)}>Cancel</button>
+                            <button type="submit" className="btn-primary"><CheckIcon size={18} weight="bold" />Save</button>
+                          </div>
+                        </form>
+                      ) : (
+                        <div className="flex items-center gap-1">
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium">{item.item_name}</p>
+                            <p className="num text-sm text-ink-2">
+                              {fmt(item.calories)} kcal{Number(item.servings) > 1 ? `, ${item.servings} servings` : ''}
+                            </p>
+                          </div>
+                          <button type="button" className="icon-btn" aria-label={`Edit ${item.item_name}`} onClick={() => startEdit(item)}><PencilSimpleIcon size={18} /></button>
+                          <button type="button" className="icon-btn hover:text-danger" aria-label={`Delete ${item.item_name}`} onClick={() => removeItem(item)}><TrashIcon size={18} /></button>
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+
+                <div className="mt-8">
+                  <h3 className="font-semibold">Add from saved foods</h3>
+                  {savedLoading && savedFoods.length === 0 ? (
+                    <div className="mt-3 flex animate-pulse gap-2" aria-hidden="true">{[0, 1, 2].map((i) => <div key={i} className="skeleton h-9 w-28 rounded-full" />)}</div>
+                  ) : savedFoods.length === 0 ? (
+                    <p className="mt-2 text-sm text-ink-2">Save foods you eat often to add them in one tap.</p>
+                  ) : (
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {savedFoods.slice(0, 12).map((s) => (
+                        <button key={s.id} type="button" className="chip max-w-full" onClick={() => addSavedToDate(s, selectedDate)} aria-label={`Add ${s.name}, ${fmt(s.calories)} kcal`}>
+                          <PlusIcon size={14} weight="bold" className="shrink-0 text-accent" />
+                          <span className="truncate">{s.name}</span>
+                          <span className="num text-ink-2">{fmt(s.calories)}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <details className="group mt-3">
+                    <summary className="btn-quiet -ml-3 cursor-pointer list-none px-3 text-sm">
+                      <BookmarkSimpleIcon size={18} aria-hidden="true" />Create a saved food
+                      <CaretDownIcon size={16} className="transition group-open:rotate-180" aria-hidden="true" />
+                    </summary>
+                    <form onSubmit={(e) => { e.preventDefault(); createSavedFood(); }} className="mt-3 space-y-3 rounded-2xl border border-line p-4">
+                      <div className="grid grid-cols-[1fr_6.5rem] gap-3">
+                        <div>
+                          <label htmlFor="s-name" className="label">Name</label>
+                          <input id="s-name" required className="field" value={newSaved.name} onChange={setS('name')} />
+                        </div>
+                        <div>
+                          <label htmlFor="s-kcal" className="label">kcal</label>
+                          <input id="s-kcal" required type="number" min={0} step="any" inputMode="decimal" className="field num" value={newSaved.calories} onChange={setS('calories')} />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        {MACROS.map((m) => (
+                          <div key={m.key}>
+                            <label htmlFor={`s-${m.key}`} className="label">{m.label} g</label>
+                            <input id={`s-${m.key}`} type="number" min={0} step="any" inputMode="decimal" className="field num" value={newSaved[`${m.key}_g`]} onChange={setS(`${m.key}_g`)} />
+                          </div>
+                        ))}
+                      </div>
+                      <button type="submit" className="btn-ghost w-full">Save food</button>
+                    </form>
+                  </details>
+                </div>
+
+                <div className="mt-8 border-t border-line pt-6">
+                  <h3 className="mb-4 font-semibold">Add an entry</h3>
+                  {manualForm(selectedDate, 'c', 'Add to this day')}
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      </main>
+    );
+  }
+
+  // Today
+  const eaten = Number(todayTotals?.calories_total || 0);
+  const burned = Number(todayActivity?.calories_burned || 0);
+  const net = eaten - burned;
+  const target = Number(targets?.calories || 0);
+  const left = target - net;
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const handle = user?.email?.split('@')[0];
+  const recipes = Array.isArray(response?.recipes) ? response.recipes : [];
+
+  return shell(
+    <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">
+      <div className="grid gap-5 lg:grid-cols-12">
+        <section className="rise panel flex flex-col p-6 sm:p-8 lg:col-span-7" style={{ '--i': 0 }} aria-labelledby="today-h">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+            <h1 id="today-h" className="min-w-0 break-words text-2xl font-semibold tracking-tight sm:text-3xl">{greeting}{handle ? `, ${handle}` : ''}</h1>
+            <p className="text-sm text-ink-2">{new Date().toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}</p>
+          </div>
+
+          <div className="my-8 grid flex-1 items-center gap-8 sm:grid-cols-[minmax(0,15rem)_1fr]">
+            <div className="mx-auto w-full max-w-[15rem]">
+              {targetsLoading ? (
+                <div className="skeleton aspect-square w-full animate-pulse rounded-full" aria-hidden="true" />
+              ) : (
+                <Ring value={net} max={target} label={target ? `${fmt(net)} of ${fmt(target)} kcal net today` : `${fmt(net)} kcal net today`}>
+                  <div>
+                    <div className="num text-4xl font-semibold tracking-tight sm:text-5xl">{fmt(Math.abs(target ? left : net))}</div>
+                    <div className="mt-1 text-sm text-ink-2">
+                      {!target ? 'kcal net today' : left >= 0 ? `kcal left of ${fmt(target)}` : 'kcal over target'}
+                    </div>
+                  </div>
+                </Ring>
+              )}
+            </div>
+
+            <div className="space-y-5">
+              {targetsLoading && [0, 1, 2].map((i) => <div key={i} className="skeleton h-9 animate-pulse" aria-hidden="true" />)}
+              {targets && MACROS.map((m) => (
+                <MacroMeter key={m.key} label={m.label} dot={m.dot} value={Number(todayTotals?.[`${m.key}_total`] || 0)} target={Number(targets[`${m.key}_g`]) || 0} />
+              ))}
+              {!targets && !targetsLoading && (
+                <div className="rounded-2xl bg-surface-2/70 p-5 text-[15px] leading-relaxed text-ink-2">
+                  <p>Add your age, sex, height and weight to get daily calorie and macro targets.</p>
+                  <button type="button" className="btn-ghost mt-4" onClick={() => setShowProfileForm(true)}>Complete profile</button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-auto grid grid-cols-3 gap-4 border-t border-line pt-6">
+            <Stat icon={ForkKnifeIcon} label="Eaten" value={fmt(eaten)} />
+            <Stat icon={FireIcon} label="Burned" value={fmt(burned)} />
+            <Stat icon={EqualsIcon} label="Net" value={fmt(net)} />
+          </div>
+          <form onSubmit={logSteps} className="mt-5 flex flex-wrap items-center gap-3">
+            <label htmlFor="steps" className="flex items-center gap-2 text-sm text-ink-2"><FootprintsIcon size={18} aria-hidden="true" />Steps today</label>
+            <input id="steps" type="number" min={0} inputMode="numeric" className="field num h-10 w-32" value={steps} onChange={(e) => setSteps(e.target.value)} placeholder="0" />
+            <button type="submit" className="btn-ghost h-10" disabled={stepsSaving}>{stepsSaving ? 'Saving…' : 'Save'}</button>
+          </form>
+        </section>
+
+        <section className="rise panel flex flex-col p-6 sm:p-8 lg:col-span-5" style={{ '--i': 1 }} aria-labelledby="log-h">
+          <h2 id="log-h" className="text-xl font-semibold tracking-tight">Log food</h2>
+          <button
+            type="button"
+            onClick={openPhotoPicker}
+            disabled={photoUploading}
+            className="mt-5 flex items-center gap-4 rounded-2xl border border-dashed border-accent/50 bg-accent-soft/50 p-4 text-left transition hover:bg-accent-soft active:scale-[0.99] disabled:opacity-70"
+          >
+            <span className="grid size-12 shrink-0 place-items-center rounded-full bg-accent text-accent-ink">
+              <CameraIcon size={24} weight="fill" className={photoUploading ? 'animate-pulse' : ''} aria-hidden="true" />
+            </span>
+            <span>
+              <span className="block font-medium">{photoUploading ? 'Analyzing photo…' : 'Log with photo'}</span>
+              <span className="block text-sm text-ink-2">Snap your plate and pick the closest match.</span>
+            </span>
+          </button>
+
+          <div className="my-6 flex items-center gap-3 text-xs text-ink-2" aria-hidden="true">
+            <span className="h-px flex-1 bg-line" />or enter it<span className="h-px flex-1 bg-line" />
+          </div>
+
+          {manualForm(todayISO(), 't', 'Add to today')}
+
+          {frequentItems.length > 0 && (
+            <div className="mt-6">
+              <h3 className="text-sm font-medium text-ink-2">Log again</h3>
+              <div className="mt-2.5 flex flex-wrap gap-2">
+                {frequentItems.slice(0, 6).map((item) => (
+                  <button
+                    key={`${item.item_name}-${item.source_type}`}
+                    type="button"
+                    className="chip max-w-full"
+                    onClick={() => handleQuickAdd(item)}
+                    aria-label={`Log ${item.item_name} again, ${fmt(item.avg_calories)} kcal`}
+                  >
+                    <PlusIcon size={14} weight="bold" className="shrink-0 text-accent" />
+                    <span className="truncate">{item.item_name}</span>
+                    <span className="num text-ink-2">{fmt(item.avg_calories)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+
+        <section className="rise panel p-6 sm:p-8 lg:col-span-8" style={{ '--i': 2 }} aria-labelledby="week-h">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h2 id="week-h" className="text-xl font-semibold tracking-tight">Calories, last {insightDays} days</h2>
+            <Segmented label="Range" value={insightDays} onChange={loadInsights} options={[[7, '7 days'], [30, '30 days']]} />
+          </div>
+          <div className={`mt-10 transition-opacity ${insightsLoading && insights ? 'opacity-50' : ''}`}>
+            {insightsLoading && !insights ? (
+              <div className="flex h-44 animate-pulse items-end gap-1" aria-hidden="true">
+                {[40, 65, 52, 80, 58, 72, 46].map((h, i) => <div key={i} className="skeleton flex-1 rounded-b-none" style={{ height: `${h}%` }} />)}
+              </div>
+            ) : insights?.rows?.length ? (
+              <CalorieChart rows={insights.rows} target={target} />
+            ) : (
+              <p className="py-12 text-center text-ink-2">Log a few meals and your week will show up here.</p>
             )}
           </div>
-        )}
+          {insights?.averages && (
+            <div className="mt-8 border-t border-line pt-6">
+              <h3 className="text-sm font-medium text-ink-2">Daily average</h3>
+              <dl className="mt-3 grid grid-cols-3 gap-x-6 gap-y-4 sm:grid-cols-5">
+                {[
+                  ['Calories', insights.averages.avg_calories, 'kcal'],
+                  ['Protein', insights.averages.avg_protein, 'g'],
+                  ['Carbs', insights.averages.avg_carbs, 'g'],
+                  ['Fat', insights.averages.avg_fat, 'g'],
+                  ['Steps', insights.averages.avg_steps, ''],
+                ].map(([label, v, unit]) => (
+                  <div key={label}>
+                    <dt className="text-xs text-ink-2 sm:text-sm">{label}</dt>
+                    <dd className="num mt-0.5 text-lg font-semibold">{fmt(v)}{unit && <span className="ml-1 text-sm font-normal text-ink-2">{unit}</span>}</dd>
+                  </div>
+                ))}
+              </dl>
+              {insights.insights?.length > 0 && (
+                <ul className="mt-5 space-y-2 text-[15px] text-ink-2">
+                  {insights.insights.map((s, i) => (
+                    <li key={i} className="flex gap-2.5"><CheckCircleIcon size={18} className="mt-0.5 shrink-0 text-accent" aria-hidden="true" />{s}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+        </section>
 
-        {/* Action Buttons */}
-        <div className="flex gap-2 mt-4 pt-4 border-t border-gray-200">
-          <button
-            onClick={onRegenerate}
-            className="flex-1 bg-gray-100 text-gray-700 py-2 px-4 rounded-md font-medium hover:bg-gray-200 text-sm"
-          >
-            🔄 Regenerate
-          </button>
-          <button
-            onClick={addToLog}
-            className="bg-green-600 text-white py-2 px-4 rounded-md font-medium hover:bg-green-700 text-sm"
-          >
-            ➕ Add to log
-          </button>
+        <section
+          className="rise flex flex-col rounded-card border border-accent/25 bg-accent-soft/60 p-6 backdrop-blur-xl sm:p-8 lg:col-span-4"
+          style={{ '--i': 3 }}
+          aria-labelledby="coach-h"
+        >
+          <SparkleIcon size={28} weight="duotone" className="text-accent" aria-hidden="true" />
+          <h2 id="coach-h" className="mt-4 text-xl font-semibold tracking-tight">Coach</h2>
+          <p className="mb-6 mt-2 text-[15px] leading-relaxed text-ink-2">A read on your last week, plus three small changes to try next.</p>
+
+          {coachLoading && (
+            <div className="mt-6 animate-pulse space-y-3" role="status" aria-label="Loading coach suggestions">
+              {[92, 76, 84, 60].map((w) => <div key={w} className="h-4 rounded-full bg-surface/70" style={{ width: `${w}%` }} />)}
+            </div>
+          )}
+
+          {coachResult && !coachLoading && (
+            <div className="mt-6 space-y-5 text-[15px] leading-relaxed">
+              {coachResult.parsed ? (
+                <>
+                  {Array.isArray(coachResult.parsed.observations) && (
+                    <div>
+                      <h3 className="text-sm font-medium text-ink-2">What stood out</h3>
+                      <ul className="mt-2 space-y-2">
+                        {coachResult.parsed.observations.map((o, i) => <li key={`o${i}`}>{o}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                  {Array.isArray(coachResult.parsed.suggestions) && (
+                    <div>
+                      <h3 className="text-sm font-medium text-ink-2">Try this week</h3>
+                      <ol className="mt-2 space-y-2.5">
+                        {coachResult.parsed.suggestions.map((s, i) => (
+                          <li key={`s${i}`} className="flex gap-3">
+                            <span className="num mt-0.5 grid size-6 shrink-0 place-items-center rounded-full bg-accent text-xs font-semibold text-accent-ink">{i + 1}</span>
+                            <span>{s}</span>
+                          </li>
+                        ))}
+                      </ol>
+                    </div>
+                  )}
+                </>
+              ) : coachResult.error ? (
+                <div role="alert" className="space-y-3">
+                  <p className="flex items-start gap-2 text-danger"><WarningCircleIcon size={18} className="mt-1 shrink-0" />{coachResult.error}</p>
+                  {KEY_CODES.includes(coachResult.code) && (
+                    <button type="button" className="btn-ghost h-10 px-4 text-sm" onClick={() => openKeySettings()}>
+                      <KeyIcon size={16} aria-hidden="true" />{keyStatus?.has_key ? 'Replace key' : 'Add key'}
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="whitespace-pre-wrap text-ink-2">{coachResult.raw}</p>
+              )}
+            </div>
+          )}
+
+          {!coachLoading && (
+            <button type="button" className={`${coachResult ? 'btn-ghost' : 'btn-primary'} mt-6 self-start lg:mt-auto`} onClick={() => askCoach(7)}>
+              {coachResult ? <><ArrowClockwiseIcon size={18} />Ask again</> : <><SparkleIcon size={18} weight="fill" />Ask the coach</>}
+            </button>
+          )}
+        </section>
+
+        <section className="rise panel p-6 sm:p-8 lg:col-span-12" style={{ '--i': 4 }} aria-labelledby="plan-h">
+          <div className="grid gap-8 lg:grid-cols-[1fr_22rem]">
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <h2 id="plan-h" className="text-2xl font-semibold tracking-tight">Plan a meal</h2>
+                <p className="mt-2 max-w-[60ch] text-[15px] text-ink-2">Uses your targets, allergies and saved preferences. Add anything specific below.</p>
+              </div>
+              <div>
+                <label htmlFor="plan-req" className="label">Special request (optional)</label>
+                <textarea id="plan-req" rows={3} className="field resize-none" value={userRequest} onChange={(e) => setUserRequest(e.target.value)} placeholder="High-protein dinner under 600 kcal" />
+              </div>
+              <div className="flex flex-wrap gap-3">
+                <button type="submit" disabled={loading} className="btn-primary">
+                  <ChefHatIcon size={18} weight="fill" />{loading ? 'Planning…' : 'Get meal plan'}
+                </button>
+                <button type="button" onClick={openPhotoPicker} disabled={photoUploading} className="btn-ghost">
+                  <CameraIcon size={18} />{photoUploading ? 'Analyzing photo…' : 'Photo to recipe'}
+                </button>
+              </div>
+            </form>
+            <div>
+              <h3 className="text-sm font-medium text-ink-2">Try asking for</h3>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {IDEAS.map((idea) => (
+                  <button key={idea} type="button" className="chip" onClick={() => setUserRequest(idea)}>{idea}</button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div ref={resultsRef} className="scroll-mt-24 lg:col-span-12">
+          {error && (
+            <div role="alert" className="flex items-start gap-3 rounded-card border border-danger/30 bg-danger/10 p-5 text-danger">
+              <WarningCircleIcon size={20} className="mt-0.5 shrink-0" />
+              <div><p className="font-medium">Couldn’t get a meal plan</p><p className="text-sm">{error}</p></div>
+            </div>
+          )}
+
+          {loading && (
+            <div className="grid items-start gap-5 md:grid-cols-2">{[0, 1].map((i) => <RecipeSkeleton key={i} />)}</div>
+          )}
+
+          {response && !loading && (
+            <section aria-labelledby="recipes-h">
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <h2 id="recipes-h" className="text-xl font-semibold tracking-tight">Suggestions</h2>
+                {response.metadata?.model && <span className="text-xs text-ink-2">via {response.metadata.model}</span>}
+              </div>
+              {recipes.length > 0 ? (
+                <div className="mt-5 grid items-start gap-5 md:grid-cols-2">
+                  {recipes.map((recipe, i) => (
+                    <RecipeCard key={i} recipe={recipe} style={{ '--i': i }} onRegenerate={() => handleSubmit()} onAddToLog={addRecipeToLog} />
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-4 rounded-card bg-surface-2/70 p-5 text-ink-2">No recipes came back. Try a different request.</p>
+              )}
+            </section>
+          )}
         </div>
       </div>
-    </div>
+    </main>
   );
 }
 

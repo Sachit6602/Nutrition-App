@@ -1,0 +1,310 @@
+/*
+  Landing page. Code-split with Landing.jsx. Always white: it pins the light tokens regardless of the OS theme.
+  Motion rules: only transform and opacity animate, all scroll motion is CSS scroll-driven (no JS scroll listeners).
+  Layers, from safest to richest:
+    reduced motion  -> flat and static, everything visible
+    no-preference   -> static 3D composition + one-time entrance (Firefox and other browsers without scroll timelines)
+    + @supports     -> hero stack assembles on scroll, story panels get a light view() entrance, progress bar
+    + lg            -> story pins and its three beats fly in and recede on named view timelines
+  No backdrop-filter on any transformed layer: demo cards are solid bg-surface.
+*/
+
+/* ---------- White theme ---------- */
+.lp {
+  color-scheme: light;
+  --bg: 255 255 255;
+  --surface: 255 255 255;
+  --surface-2: 241 245 241;
+  --ink: 14 23 18;
+  --ink-2: 74 88 80;
+  --line: 225 232 225;
+  --accent: 21 128 61;
+  --accent-ink: 255 255 255;
+  --accent-soft: 224 244 231;
+  --on-tint: 14 23 18;
+  --protein: 10 132 194;
+  --carbs: 183 121 31;
+  --fat: 224 69 123;
+  --danger: 190 30 45;
+  color: rgb(var(--ink));
+}
+/* The page background lives on body: a background on .lp would paint over the fixed ambient layer (z -10). */
+body:has(.lp) { background: #fff; }
+:root:has(.lp) { color-scheme: light; }
+.lp .ambient span:nth-child(1) { opacity: 0.16; }
+.lp .ambient span:nth-child(2) { opacity: 0.1; }
+.lp .ambient span:nth-child(3) { opacity: 0.1; }
+.lp .ambient::after { opacity: 0.03; }
+
+/* 3D food (src/food3d.js): fixed behind everything, above the ambient light; fades in once three.js has loaded. */
+.lp-field { position: fixed; inset: 0; z-index: -10; width: 100%; height: 100%; pointer-events: none; opacity: 0; transition: opacity 1s ease; }
+.lp-field.is-ready { opacity: 1; }
+
+/* ---------- Demo surfaces ---------- */
+.lp-card, .lp .panel {
+  box-shadow: 0 1px 2px rgb(14 40 24 / 0.05), 0 28px 56px -30px rgb(14 60 32 / 0.28);
+}
+.lp-hero-stage .panel,
+.lp-shot .panel { backdrop-filter: none; -webkit-backdrop-filter: none; background-color: rgb(var(--surface)); }
+.lp-shot .rise { animation: none; }
+.lp-plate { background: rgb(var(--accent)); color: rgb(var(--accent-ink)); }
+.lp .chip { height: 2.75rem; }
+/* Scan sweep over the camera tile: positioned out of flow; painted and animated only with motion. */
+.lp-scan { position: absolute; inset-inline: 0; top: 0; height: 40%; }
+@media (max-width: 767px), (pointer: coarse) { .lp-scan { display: none; } }
+
+/* Static sections below the fold skip rendering until they get close. */
+/* auto remembers the real size after the first render; 800px is the first-load estimate, so the page height doesn't jump. */
+.lp-cv { content-visibility: auto; contain-intrinsic-size: auto 800px; }
+/* Solid panels below the fold: a backdrop blur over the drifting ambient light repaints every frame. */
+.lp-cv .panel { backdrop-filter: none; -webkit-backdrop-filter: none; background-color: rgb(var(--surface)); }
+
+/* Scroll progress under the header (only where scroll timelines exist). */
+.lp-progress { display: none; }
+
+/* ---------- Pointer light + lean ---------- */
+.lp-spot { position: relative; isolation: isolate; }
+.lp-spot::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
+  opacity: 0; transition: opacity 0.35s ease;
+  background: radial-gradient(440px circle at var(--mx, 50%) var(--my, 50%), rgb(var(--accent) / 0.1), transparent 65%);
+}
+@media (hover: hover) { .lp-spot:hover::before { opacity: 1; } }
+
+/* ---------- Hero stage ---------- */
+.lp-hero {
+  --lp-rx: 8deg;
+  --lp-ry: -10deg;
+  position: relative;
+  contain: layout paint; /* clips stage overflow at the section edges, no horizontal scroll */
+}
+/* Dot grid that fades out from behind the stage. */
+.lp-hero::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  background-image: radial-gradient(rgb(var(--ink) / 0.09) 1px, transparent 1.2px);
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 60% 55% at 72% 48%, #000 15%, transparent 75%);
+  mask-image: radial-gradient(ellipse 60% 55% at 72% 48%, #000 15%, transparent 75%);
+}
+.lp-hero-stage { position: relative; height: 36rem; perspective: 1600px; perspective-origin: 50% 40%; }
+.lp-tilt, .lp-stack { position: absolute; inset: 0; transform-style: preserve-3d; }
+.lp-hp { position: absolute; }
+.lp-hp1 { top: 0; left: 0; width: 90%; }
+.lp-hp2 { top: 27%; right: 0; width: 86%; }
+.lp-hp3 { bottom: 0; left: 2%; width: 94%; --lp-z3: 40px; }
+
+@media (min-width: 768px) {
+  .lp-hero { --lp-rx: 14deg; --lp-ry: -22deg; }
+  .lp-hero-stage { height: 30rem; }
+  .lp-hp1 { top: 2%; width: 72%; }
+  .lp-hp2 { top: 36%; width: 72%; }
+  .lp-hp3 { width: 56%; --lp-z3: 120px; }
+}
+@media (min-width: 1024px) {
+  .lp-hero-stage { height: 34rem; }
+}
+
+/* "+540" that floats off the ring when a meal is logged. Hidden unless motion is allowed. */
+.lp-pop {
+  position: absolute; top: -0.5rem; right: -0.75rem; opacity: 0; pointer-events: none;
+  border-radius: 9999px; background: rgb(var(--accent)); color: rgb(var(--accent-ink));
+  padding: 0.125rem 0.5rem; font-size: 0.75rem; font-weight: 600;
+}
+
+/* ---------- Story (base: vertical sequence) ---------- */
+.lp-story-sec { overflow-x: clip; }
+.lp-mark, .lp-steps { display: none; }
+.lp-pin-inner { display: grid; gap: 4.5rem; padding-top: 3.5rem; padding-bottom: 2rem; }
+.lp-beat { display: grid; gap: 1.75rem; }
+@media (min-width: 768px) {
+  .lp-beat { grid-template-columns: 0.85fr 1.15fr; align-items: center; gap: 3.5rem; }
+}
+
+/* ---------- Targets lab ---------- */
+/* Range: filled to the thumb with the accent, 44px tall hit area from h-11. */
+.lp-range { -webkit-appearance: none; appearance: none; background: transparent; }
+.lp-range::-webkit-slider-runnable-track {
+  height: 6px; border-radius: 9999px;
+  background: linear-gradient(to right, rgb(var(--accent)) var(--p), rgb(var(--line)) var(--p));
+}
+.lp-range::-moz-range-track { height: 6px; border-radius: 9999px; background: rgb(var(--line)); }
+.lp-range::-moz-range-progress { height: 6px; border-radius: 9999px; background: rgb(var(--accent)); }
+.lp-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; margin-top: -9px; width: 24px; height: 24px; border-radius: 9999px;
+  background: #fff; border: 2px solid rgb(var(--accent)); box-shadow: 0 2px 8px rgb(14 60 32 / 0.25);
+  transition: transform 0.15s ease;
+}
+.lp-range::-moz-range-thumb {
+  width: 20px; height: 20px; border-radius: 9999px;
+  background: #fff; border: 2px solid rgb(var(--accent)); box-shadow: 0 2px 8px rgb(14 60 32 / 0.25);
+}
+.lp-range:active::-webkit-slider-thumb { transform: scale(1.15); }
+.lp-range:focus-visible { --tw-ring-offset-width: 4px; border-radius: 9999px; }
+
+/* ---------- Open source terminal card ---------- */
+/* A deliberately dark slab on the white page: the one place that looks like a terminal. Text inside is white on near-black (AA). */
+.lp-term { background: rgb(12 20 16); box-shadow: 0 1px 2px rgb(14 40 24 / 0.08), 0 28px 56px -30px rgb(14 60 32 / 0.45); }
+.lp-term.lp-spot::before { background: radial-gradient(440px circle at var(--mx, 50%) var(--my, 50%), rgb(63 203 126 / 0.12), transparent 65%); }
+
+/* ---------- Final CTA ---------- */
+.lp-cta::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(60% 120% at 100% 0%, rgb(255 255 255 / 0.22), transparent 60%),
+    radial-gradient(40% 90% at 0% 100%, rgb(var(--protein) / 0.35), transparent 70%);
+}
+
+/* ---------- Static 3D composition + one-time entrance (motion allowed) ---------- */
+@media (prefers-reduced-motion: no-preference) {
+  .lp-tilt {
+    transform: rotateX(var(--lp-py, 0deg)) rotateY(var(--lp-px, 0deg));
+    transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .lp-stack { transform: rotateX(var(--lp-rx)) rotateY(var(--lp-ry)); }
+  .lp-hp1 { transform: translate3d(0, 0, 60px); }
+  .lp-hp2 { transform: translate3d(0, 0, -40px); }
+  .lp-hp3 { transform: translate3d(0, 0, var(--lp-z3)); }
+  .lp-hero-stage { animation: lp-stage-in 1.1s cubic-bezier(0.16, 1, 0.3, 1) 0.35s both; }
+
+  .lp-word { display: inline-block; animation: lp-word 0.9s cubic-bezier(0.16, 1, 0.3, 1) both; animation-delay: calc(var(--i) * 90ms + 0.05s); }
+  .lp-pop { animation: lp-pop 1.1s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .lp-scan {
+    background: linear-gradient(to bottom, transparent, rgb(255 255 255 / 0.55), transparent);
+    animation: lp-scan 2.4s ease-in-out infinite;
+  }
+
+  .lp-shot { transform: perspective(1400px) translate3d(0, 0, 0) rotateX(3deg) rotateY(0deg); }
+
+  .lp-day { transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+  .lp-day:hover { transform: scale(1.12); }
+
+  .lp .chip:hover:not(:active) { transform: translateY(-1px); }
+}
+@media (prefers-reduced-motion: no-preference) and (hover: hover) {
+  [data-tilt] { transition: transform 0.7s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.35s ease; }
+  [data-tilt]:hover {
+    transform: perspective(1100px) rotateX(var(--ty, 0deg)) rotateY(var(--tx, 0deg));
+    transition-duration: 0.2s, 0.35s;
+    box-shadow: 0 1px 2px rgb(14 40 24 / 0.05), 0 36px 64px -30px rgb(14 60 32 / 0.36);
+  }
+}
+@media (prefers-reduced-motion: no-preference) and (min-width: 768px) {
+  .lp-shot { transform: perspective(1400px) translate3d(0, 0, 0) rotateX(4deg) rotateY(-9deg); }
+}
+
+@keyframes lp-stage-in { from { opacity: 0; transform: translateY(28px); } }
+@keyframes lp-word { from { opacity: 0; transform: translateY(0.45em) rotateX(-50deg); } }
+@keyframes lp-pop {
+  0% { opacity: 0; transform: translateY(6px) scale(0.8); }
+  20% { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-30px) scale(1); }
+}
+@keyframes lp-scan { 0% { transform: translateY(-110%); } 100% { transform: translateY(260%); } }
+
+/* ---------- Scroll-driven layer ---------- */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .lp-progress {
+      display: block; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px;
+      background: rgb(var(--accent)); transform-origin: 0 50%;
+      animation: lp-grow linear both; animation-timeline: scroll(root block);
+    }
+
+    /* Hero: the stack un-rotates and fans apart while the hero scrolls away. */
+    .lp-hero { view-timeline: --lp-hero block; }
+    .lp-stack, .lp-hp { will-change: transform; }
+    .lp-stack { animation: lp-stack-out linear both; animation-timeline: --lp-hero; animation-range: exit 0% exit 100%; }
+    .lp-hp1 { animation: lp-hp1-out linear both; animation-timeline: --lp-hero; animation-range: exit 0% exit 100%; }
+    .lp-hp2 { animation: lp-hp2-out linear both; animation-timeline: --lp-hero; animation-range: exit 0% exit 100%; }
+    .lp-hp3 { animation: lp-hp3-out linear both; animation-timeline: --lp-hero; animation-range: exit 0% exit 100%; }
+
+    /* Story below lg: each panel rises in as it enters (implicit end keyframe = static pose). */
+    .lp-shot { animation: lp-rise linear both; animation-timeline: view(); animation-range: entry 0% entry 70%; }
+  }
+
+  @media (prefers-reduced-motion: no-preference) and (min-width: 1024px) {
+    /* Story at lg: 320vh track, sticky stage, three invisible 100vh markers drive the beats. */
+    .lp-story { position: relative; height: 320vh; timeline-scope: --lp-b1, --lp-b2, --lp-b3; }
+    .lp-mark { display: block; position: absolute; left: 0; width: 1px; height: 100vh; visibility: hidden; pointer-events: none; }
+    .lp-m1 { top: 0; view-timeline: --lp-b1 block; }
+    .lp-m2 { top: 100vh; view-timeline: --lp-b2 block; }
+    .lp-m3 { top: 200vh; view-timeline: --lp-b3 block; }
+
+    .lp-pin { position: sticky; top: 4rem; height: calc(100vh - 4rem); contain: layout paint; }
+    .lp-pin-inner { position: relative; display: block; height: 100%; padding: 0; }
+    .lp-beat { position: absolute; inset: 0 1.5rem; grid-template-columns: 0.8fr 1.2fr; gap: 4rem; }
+
+    .lp-copy { animation: lp-copy linear both; animation-range: cover; }
+    .lp-shot { animation: lp-shot linear both; animation-range: cover; will-change: transform, opacity; }
+    .lp-b3 .lp-copy { animation-name: lp-copy-last; }
+    .lp-b3 .lp-shot { animation-name: lp-shot-last; }
+
+    /* Step indicator: each bar fills while its beat is on stage. */
+    .lp-steps {
+      display: flex; gap: 1.25rem; position: absolute; left: 1.5rem; bottom: 2.5rem; margin: 0; padding: 0; list-style: none;
+      font-size: 0.8125rem; font-weight: 500; color: rgb(var(--ink));
+    }
+    .lp-step { display: grid; gap: 0.5rem; width: 6.5rem; }
+    .lp-step i { display: block; height: 3px; border-radius: 9999px; background: rgb(var(--line)); overflow: hidden; }
+    .lp-step i::after {
+      content: ""; display: block; height: 100%; background: rgb(var(--accent)); transform-origin: 0 50%;
+      animation: lp-grow linear both; animation-range: cover 0% cover 50%;
+    }
+    .lp-step span { animation: lp-step-label linear both; animation-range: cover 30% cover 80%; }
+    .lp-s3 span { animation-name: lp-step-label-last; }
+
+    /* After the shorthands, since `animation` resets animation-timeline. */
+    .lp-b1 .lp-copy, .lp-b1 .lp-shot, .lp-s1 i::after, .lp-s1 span { animation-timeline: --lp-b1; }
+    .lp-b2 .lp-copy, .lp-b2 .lp-shot, .lp-s2 i::after, .lp-s2 span { animation-timeline: --lp-b2; }
+    .lp-b3 .lp-copy, .lp-b3 .lp-shot, .lp-s3 i::after, .lp-s3 span { animation-timeline: --lp-b3; }
+  }
+}
+
+@keyframes lp-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes lp-step-label {
+  0%, 100% { opacity: 0.45; }
+  20%, 80% { opacity: 1; }
+}
+@keyframes lp-step-label-last {
+  0% { opacity: 0.45; }
+  20%, 100% { opacity: 1; }
+}
+@keyframes lp-stack-out {
+  from { transform: rotateX(var(--lp-rx)) rotateY(var(--lp-ry)); }
+  to { transform: rotateX(2deg) rotateY(0deg); }
+}
+@keyframes lp-hp1-out {
+  from { transform: translate3d(0, 0, 60px); }
+  to { transform: translate3d(-1.25rem, -1.5rem, 110px); }
+}
+@keyframes lp-hp2-out {
+  from { transform: translate3d(0, 0, -40px); }
+  to { transform: translate3d(1.5rem, 0.5rem, -90px); }
+}
+@keyframes lp-hp3-out {
+  from { transform: translate3d(0, 0, var(--lp-z3)); }
+  to { transform: translate3d(-0.75rem, 1.75rem, calc(var(--lp-z3) + 50px)); }
+}
+@keyframes lp-rise {
+  from { opacity: 0; transform: perspective(1400px) translate3d(0, 3rem, -120px) rotateX(14deg) rotateY(0deg); }
+}
+
+/* Cover range of a 100vh marker: 0-50% entering, 50-100% leaving. Holds sit around the middle. */
+@keyframes lp-shot {
+  0%, 22% { opacity: 0; transform: perspective(1400px) translate3d(0, 6%, -520px) rotateX(8deg) rotateY(32deg); }
+  40%, 66% { opacity: 1; transform: perspective(1400px) translate3d(0, 0, 0) rotateX(2deg) rotateY(-6deg); }
+  72%, 100% { opacity: 0; transform: perspective(1400px) translate3d(0, -8%, -360px) rotateX(-6deg) rotateY(-24deg); }
+}
+@keyframes lp-shot-last {
+  0%, 22% { opacity: 0; transform: perspective(1400px) translate3d(0, 6%, -520px) rotateX(8deg) rotateY(32deg); }
+  40%, 100% { opacity: 1; transform: perspective(1400px) translate3d(0, 0, 0) rotateX(2deg) rotateY(-6deg); }
+}
+@keyframes lp-copy {
+  0%, 24% { opacity: 0; transform: translateY(2rem); }
+  40%, 66% { opacity: 1; transform: translateY(0); }
+  74%, 100% { opacity: 0; transform: translateY(-2rem); }
+}
+@keyframes lp-copy-last {
+  0%, 24% { opacity: 0; transform: translateY(2rem); }
+  40%, 100% { opacity: 1; transform: translateY(0); }
+}
