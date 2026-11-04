@@ -1441,7 +1441,7 @@ function App() {
             <TrashIcon size={20} aria-hidden="true" />Delete account
           </h3>
           <p className="text-sm leading-relaxed text-ink-2">
-            Permanently removes your account, profile, food and activity logs, photos, saved foods and AI key. This can’t be undone.
+            Permanently removes your account, profile, food and activity logs, saved foods and AI key. This can’t be undone.
             {' '}<a href="/privacy" className="font-medium text-accent hover:underline">Privacy Policy</a>
           </p>
           {!deleteOpen ? (

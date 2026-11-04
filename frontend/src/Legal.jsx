@@ -16,7 +16,8 @@ function Privacy() {
     <>
       <p>
         This policy explains what Healthy Diet Tracker (&ldquo;we&rdquo;, &ldquo;the app&rdquo;) collects, why, who it is shared with,
-        and the rights you have under India&rsquo;s Digital Personal Data Protection Act, 2023 (DPDP Act). We act as the Data Fiduciary
+        and the rights we give you. These follow India&rsquo;s Digital Personal Data Protection Act, 2023 (DPDP Act). Most of the Act&rsquo;s
+        rights and duties are not in force yet and are due to start on 13 May 2027, but we honour them now. We act as the Data Fiduciary
         for the personal data you give the app.
       </p>
 
@@ -25,10 +26,19 @@ function Privacy() {
         <li><b>Account:</b> your email address, and your password stored only as a salted PBKDF2 hash (we never see or store the password itself).</li>
         <li><b>Profile and health information:</b> age, sex, height, weight, activity level, goal, optional calorie target, allergies, diet type and food preferences.</li>
         <li><b>Logs:</b> foods you log (names, calories, macros, servings, dates), steps and activity, and saved foods.</li>
-        <li><b>Photos:</b> a food photo you upload is sent to your AI provider for analysis. If you then log that food, a compressed copy of the photo is saved with the entry.</li>
+        <li><b>Photos:</b> when you choose a food photo, your browser shrinks it and sends it to your AI provider to estimate what&rsquo;s in it. We don&rsquo;t store the photo; only the food details you choose to log are saved.</li>
         <li><b>Your AI provider key:</b> encrypted with AES-256-GCM before it is stored. We only ever show its last 4 characters.</li>
-        <li><b>Coach history:</b> the most recent coach request and response, kept to help diagnose problems.</li>
-        <li><b>Technical data:</b> one essential sign-in cookie, and short-lived server logs (request method and path). Our host, Cloudflare, processes your IP address to deliver the site, protect it, and limit repeated sign-in attempts.</li>
+        <li>
+          <b>Latest AI request:</b> a copy of your most recent AI request and your provider&rsquo;s full reply. It can be a meal plan, recipe analysis
+          or coach request, and includes what was sent: your targets, allergies, diet type and preferences, plus any meal request you typed, recipe
+          link you entered or recent food totals. Only the latest one is kept, each new request replaces it, and we keep it only to help diagnose problems.
+        </li>
+        <li>
+          <b>Technical data:</b> one essential sign-in cookie, and server logs that our host, Cloudflare, keeps for up to 7 days. They record each
+          request&rsquo;s method and path, details Cloudflare adds such as the time and approximate location, and any error messages. If an AI reply
+          can&rsquo;t be read, the log can include part of that reply, which may mention your targets, allergies or food preferences. Cloudflare also
+          processes your IP address to deliver the site, protect it, and limit repeated sign-in attempts.
+        </li>
       </ul>
       <p>We do not use advertising, analytics or tracking cookies, and we do not sell or rent your data.</p>
 
@@ -48,9 +58,14 @@ function Privacy() {
         </li>
         <li>
           <b>The AI provider you choose</b> (for example OpenAI, Anthropic, Google, OpenRouter, Groq, Perplexity, xAI, Mistral or DeepSeek)
-          receives the content of each AI request you make: your targets, allergies and preferences, summaries of your recent logs, and any
-          photo you upload. Requests are made with your own key, so the provider&rsquo;s terms and privacy policy apply to that data and to
-          any charges.
+          receives the content of each AI request you make: your daily targets and goal, allergies, diet type and preferences, anything you
+          type into a request (such as a meal request, recipe search or recipe link), your daily calorie, protein and step totals for coaching,
+          and any photo you upload. Most of these providers process data outside India, including in the United States. Requests are made with
+          your own key, so the provider&rsquo;s terms and privacy policy apply to that data and to any charges.
+        </li>
+        <li>
+          <b>Recipe websites:</b> recipe pictures suggested by the AI load directly from the websites that host them, so those websites receive
+          your IP address and browser details when a recipe is shown. If you open an original recipe link, that website&rsquo;s own privacy policy applies.
         </li>
         <li>Authorities, if the law requires us to disclose data.</li>
       </ul>
@@ -58,20 +73,25 @@ function Privacy() {
       <H id="keep">How long we keep it</H>
       <p>
         We keep your data while your account exists. Sign-in sessions expire after 7 days. When you delete your account, your account, profile,
-        logs, photos, saved foods and AI key are removed from the live database immediately. Our database provider keeps short-term recovery
-        backups, so deleted data can remain in those for up to 30 days before it is gone for good.
+        logs, saved foods, latest AI request and AI key are removed from the live database immediately. Our database provider keeps short-term
+        recovery backups, so deleted data can remain in those for up to 30 days before it is gone for good. Server logs are deleted automatically
+        within 7 days; deleting your account does not remove them sooner.
       </p>
 
       <H id="rights">Your rights</H>
-      <p>Under the DPDP Act you can:</p>
+      <p>You can do the following now. Once the relevant parts of the DPDP Act are in force, these will also be your legal rights under it:</p>
       <ul>
         <li>ask for a summary of the personal data we hold about you and who it has been shared with;</li>
         <li>correct or update it (most of it you can edit directly in your profile and logs);</li>
         <li>erase it, using Delete account in your profile, or by emailing us;</li>
         <li>nominate someone to exercise these rights for you if you die or become unable to;</li>
-        <li>raise a grievance with us, and if you are not satisfied with our response, complain to the Data Protection Board of India.</li>
+        <li>raise a grievance with us. Once the DPDP Act&rsquo;s complaint provisions are in force, if you are not satisfied with our response, you can also complain to the Data Protection Board of India.</li>
       </ul>
-      <p>For any of these, or a grievance, email <Mail />. We aim to reply within 30 days.</p>
+      <p>
+        To use any of these rights, to nominate someone, or to raise a grievance, email <Mail /> from the email address on your account, which is how we
+        confirm it is you. For a nomination, include the nominee&rsquo;s name and email address. We will reply within 30 days. If you are not satisfied
+        with our reply, you can file a complaint with the Data Protection Board of India through its official website.
+      </p>
 
       <H id="kids">Children</H>
       <p>The app is only for people aged 18 or over. We do not knowingly collect data from children; if you believe a child has signed up, email us and we will delete the account.</p>
@@ -79,7 +99,7 @@ function Privacy() {
       <H id="security">Security</H>
       <p>
         Data travels over HTTPS. Passwords are hashed, AI keys are encrypted, sign-in tokens are stored only as hashes, and sign-in attempts are rate-limited.
-        No system is perfectly secure; if a breach affects your data, we will tell you and the Data Protection Board as the law requires.
+        No system is perfectly secure. If a breach affects your data, we will tell you promptly, and we will tell the Data Protection Board once the law requires it.
       </p>
 
       <H id="changes">Changes and contact</H>

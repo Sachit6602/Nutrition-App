@@ -1,5 +1,5 @@
 // CV service for food image analysis on the user's own provider (see ai_client.js, kind 'vision').
-// Falls back to a mocked response if the call fails.
+// Returns no candidates (never made-up ones) when the model gives nothing usable.
 
 import { chat, isKeyError } from './ai_client.js';
 import crypto from 'crypto';
@@ -79,13 +79,10 @@ export async function analyzeFoodImage({ image_base64, image_url, ai }) {
     }
   }
 
-  // Fallback: small mocked candidates to keep UI usable; include debug info for troubleshooting
-  console.warn('[CV] Falling back to mocked candidates; returning debug info');
-  const fallback = [
-    { label: 'Grilled chicken breast', calories: 220, protein_g: 40, carbs_g: 0, fat_g: 5, confidence: 0.6, portion_text: '~150 g' },
-    { label: 'Mixed salad (lettuce, tomato, cucumber)', calories: 60, protein_g: 2, carbs_g: 8, fat_g: 2, confidence: 0.45, portion_text: '1 cup' }
-  ];
-  return { candidates: fallback, debug: { fallback: true, ...lastDebug } };
+  // Nothing usable after the retries: return no candidates so the app says it couldn't recognise the photo.
+  // (It used to return made-up example foods, which looked like real estimates of the user's photo.)
+  console.warn('[CV] No usable candidates after retries');
+  return { candidates: [], debug: { fallback: true, ...lastDebug } };
 }
 
 export default analyzeFoodImage;
