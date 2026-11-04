@@ -466,7 +466,7 @@ export default function Landing({ onSignIn, onCreateAccount }) {
 
   // Browser chrome matches the white page even in OS dark mode.
   useEffect(() => {
-    const m = document.querySelector('meta[name="theme-color"][media*="dark"]');
+    const m = document.querySelector('meta[name="theme-color"]');
     const prev = m?.content;
     if (m) m.content = '#ffffff';
     return () => { if (m) m.content = prev; };

@@ -2,7 +2,8 @@ import { Suspense, lazy, useState, useEffect, useCallback, useRef } from 'react'
 import {
   ArrowClockwiseIcon, ArrowSquareOutIcon, BookmarkSimpleIcon, CalendarBlankIcon, CameraIcon, CaretDownIcon, CaretLeftIcon,
   CaretRightIcon, CheckCircleIcon, CheckIcon, ChefHatIcon, EqualsIcon, EyeIcon, EyeSlashIcon, FireIcon, FootprintsIcon, ForkKnifeIcon,
-  HouseIcon, KeyIcon, LeafIcon, PencilSimpleIcon, PlusIcon, ShieldCheckIcon, SignOutIcon, SlidersHorizontalIcon, SparkleIcon, TrashIcon,
+  HouseIcon, KeyIcon, LeafIcon, MonitorIcon, MoonIcon, PencilSimpleIcon, PlusIcon, ShieldCheckIcon, SignOutIcon, SlidersHorizontalIcon,
+  SparkleIcon, SunIcon, TrashIcon,
   TrendDownIcon, TrendUpIcon, WarningCircleIcon,
 } from '@phosphor-icons/react';
 import { CalorieChart, MACROS, MacroMeter, RecipeCard, Ring, Sheet, Toast, fmt, parseDay } from './ui.jsx';
@@ -66,6 +67,36 @@ const KEY_CODES = ['API_KEY_REQUIRED', 'API_KEY_INVALID', 'API_KEY_NO_CREDITS', 
 // Matches a pasted key to a provider by prefix (list comes from GET /ai/providers). null = ambiguous, user picks.
 const detectProvider = (providers, key) =>
   providers.find((p) => p.prefix && new RegExp(p.prefix).test(key.trim())) || null;
+
+// ---------- Theme: 'system' | 'light' | 'dark', saved per device ----------
+// index.html runs the same logic before first paint; this keeps it in sync and follows the OS live on "system".
+const THEMES = ['system', 'light', 'dark'];
+const THEME_LABEL = { system: 'System', light: 'Light', dark: 'Dark' };
+function applyTheme(choice) {
+  const dark = choice === 'dark' || (choice === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  // The landing page sets its own white browser-chrome colour; leave that alone while it is showing.
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta && !document.querySelector('.lp')) meta.content = dark ? '#080D0B' : '#F4F7F3';
+}
+function useTheme() {
+  const [theme, setTheme] = useState(() => {
+    try { return localStorage.getItem('theme') || 'system'; } catch { return 'system'; }
+  });
+  useEffect(() => {
+    applyTheme(theme);
+    try {
+      if (theme === 'system') localStorage.removeItem('theme');
+      else localStorage.setItem('theme', theme);
+    } catch { /* storage blocked: the choice lasts for this visit */ }
+    if (theme !== 'system') return undefined;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const follow = () => applyTheme('system');
+    mq.addEventListener('change', follow);
+    return () => mq.removeEventListener('change', follow);
+  }, [theme]);
+  return [theme, setTheme];
+}
 
 // Signed-out marketing page; its JS and CSS load as their own chunk only when needed.
 // The import starts at module load so it runs alongside /auth/status instead of after it.
@@ -251,6 +282,8 @@ function App() {
     const t = setTimeout(() => setToast(null), 3600);
     return () => clearTimeout(t);
   }, [toast]);
+
+  const [theme, setTheme] = useTheme();
 
   // Simple client-side routing (home or /calendar)
   const [route, setRoute] = useState(window.location.pathname || '/');
@@ -1401,6 +1434,15 @@ function App() {
           </nav>
         )}
         <div className={`flex items-center ${onboarding ? 'ml-auto' : ''}`}>
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => setTheme(THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length])}
+            aria-label={`Theme: ${THEME_LABEL[theme]}. Switch to ${THEME_LABEL[THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length]]}`}
+            title={`Theme: ${THEME_LABEL[theme]}`}
+          >
+            {theme === 'light' ? <SunIcon size={20} aria-hidden="true" /> : theme === 'dark' ? <MoonIcon size={20} aria-hidden="true" /> : <MonitorIcon size={20} aria-hidden="true" />}
+          </button>
           {!onboarding && (
             <button type="button" className="icon-btn" aria-label="Profile and targets" title="Profile and targets" onClick={() => setShowProfileForm(true)}>
               <SlidersHorizontalIcon size={20} />

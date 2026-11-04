@@ -6,10 +6,19 @@
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#F4F7F3" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#080D0B" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#F4F7F3" />
     <meta name="description" content="Track food and activity, see your daily targets, and plan meals around them." />
     <title>Healthy Diet Tracker</title>
+    <!-- Theme before first paint, so the page never flashes the wrong colours. Mirrors applyTheme in src/App.jsx. -->
+    <script>
+      (function () {
+        var choice = 'system';
+        try { choice = localStorage.getItem('theme') || 'system'; } catch (e) {}
+        var dark = choice === 'dark' || (choice === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        document.querySelector('meta[name="theme-color"]').content = dark ? '#080D0B' : '#F4F7F3';
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

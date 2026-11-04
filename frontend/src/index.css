@@ -26,24 +26,24 @@
     --danger: 190 30 45;
   }
 
-  @media (prefers-color-scheme: dark) {
-    :root {
-      color-scheme: dark;
-      --bg: 8 13 11;
-      --surface: 19 27 23;
-      --surface-2: 28 38 33;
-      --ink: 233 241 236;
-      --ink-2: 152 168 159;
-      --line: 40 53 46;
-      --accent: 63 203 126;
-      --accent-ink: 4 28 14;
-      --accent-soft: 22 50 34;
-      --on-tint: 4 28 14;
-      --protein: 36 150 190;
-      --carbs: 191 132 24;
-      --fat: 217 85 124;
-      --danger: 248 113 113;
-    }
+  /* Dark palette. data-theme is set before first paint by the script in index.html, from the saved choice
+     (System / Light / Dark, see App.jsx useTheme); "System" resolves to the OS setting and follows it live. */
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: 8 13 11;
+    --surface: 19 27 23;
+    --surface-2: 28 38 33;
+    --ink: 233 241 236;
+    --ink-2: 152 168 159;
+    --line: 40 53 46;
+    --accent: 63 203 126;
+    --accent-ink: 4 28 14;
+    --accent-soft: 22 50 34;
+    --on-tint: 4 28 14;
+    --protein: 36 150 190;
+    --carbs: 191 132 24;
+    --fat: 217 85 124;
+    --danger: 248 113 113;
   }
 
   html { -webkit-tap-highlight-color: transparent; scroll-padding-top: 5rem; }
@@ -113,9 +113,8 @@
   content: ""; position: absolute; inset: 0; opacity: 0.05; mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
-@media (prefers-color-scheme: dark) {
-  .ambient span:nth-child(1) { opacity: 0.18; }
-}
+/* Same specificity as the landing page's own .lp .ambient rules, which load later and so win there (it stays white). */
+[data-theme="dark"] .ambient span:nth-child(1) { opacity: 0.18; }
 
 /* Motion: entrance stagger, ring draw, bar growth, ambient drift. All of it is off under reduced motion. */
 @media (prefers-reduced-motion: no-preference) {
