@@ -15,13 +15,13 @@
     "run_worker_first": ["/api", "/api/*", "/auth/*", "/me/*", "/ai/*", "/health", "/debug/*"]
   },
 
-  // `npx wrangler d1 create nutrition-db` prints the real database_id; paste it here before deploying.
+  // The deployed database. For your own copy, run `npx wrangler d1 create nutrition-db` and paste its database_id.
   // Local dev ignores it and uses a SQLite file under .wrangler/.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "nutrition-db",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "c30106c2-a8c6-4336-b80f-05dd2eb96d83",
       "migrations_dir": "migrations"
     }
   ],
@@ -32,7 +32,7 @@
   ],
 
   // Non-secret settings. Secrets (API_KEY_ENCRYPTION_KEY) go in .dev.vars locally and `wrangler secret put` remotely.
-  "vars": { "PBKDF2_ITERATIONS": "100000" },
+  "vars": { "PBKDF2_ITERATIONS": "100000", "NODE_ENV": "production" },
 
   "observability": { "enabled": true }
 }

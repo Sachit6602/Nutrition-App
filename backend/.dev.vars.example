@@ -14,3 +14,6 @@ API_KEY_ENCRYPTION_KEY=
 # COOKIE_SAMESITE=none                           # same case: lets the session cookie cross sites
 # OPENAI_TEXT_MODEL=gpt-6-luna                   # per-provider model overrides, defaults in ai_client.js
 # ANTHROPIC_MODEL=claude-opus-5-5
+
+# Local only: enables the /debug routes (production gets NODE_ENV=production from wrangler.jsonc vars).
+NODE_ENV=development
